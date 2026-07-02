@@ -16,13 +16,28 @@ import json
 import os
 
 from drq.config import DRQConfig, LLMConfig, MapElitesConfig
+from drq.domains.code_improvement import CodeChallenge, CodeImprovementDomain
 from drq.domains.text2sql import Challenge, Text2SQLDomain
 from drq.engine import DRQ
 from drq.generality import evaluate_lineage
 from drq.llm import LLMClient
 
 
-HELDOUT = [
+# Domain registry: run.py is the ONLY module that knows concrete domains.
+# engine.py and generality.py stay domain-agnostic (see CLAUDE.md architecture rules).
+DOMAINS = {
+    "text2sql": Text2SQLDomain,
+    "code_improvement": CodeImprovementDomain,
+}
+
+# Challenge type per domain, used to deserialize a user-supplied --heldout file.
+DOMAIN_CHALLENGE = {
+    "text2sql": Challenge,
+    "code_improvement": CodeChallenge,
+}
+
+
+TEXT2SQL_HELDOUT = [
     Challenge(
         schema_sql=("CREATE TABLE t(id INTEGER, cat TEXT, v INTEGER, ts DATE);"
                     "INSERT INTO t VALUES (1,'x',10,'2024-01-01'),(2,'x',20,'2024-02-01'),"
@@ -42,6 +57,34 @@ HELDOUT = [
     ),
 ]
 
+# A held-out code-improvement challenge (not in SEED_CHALLENGES) so generality
+# measures transfer, not memorization.
+CODE_IMPROVEMENT_HELDOUT = [
+    CodeChallenge(
+        task=("safe_div must return 0.0 when the denominator is 0 instead of raising, "
+              "and otherwise return a / b."),
+        files={
+            "mathutil.py": ("def safe_div(a, b):\n    return a / b\n"),
+            "test_target.py": ("from mathutil import safe_div\n"
+                               "def test_zero_denominator():\n"
+                               "    assert safe_div(1, 0) == 0.0\n"
+                               "def test_normal():\n"
+                               "    assert safe_div(6, 3) == 2\n"),
+        },
+        target_file="mathutil.py",
+        gold_content=("def safe_div(a, b):\n"
+                      "    if b == 0:\n"
+                      "        return 0.0\n"
+                      "    return a / b\n"),
+        tags=["guard", "division"],
+    ),
+]
+
+HELDOUT = {
+    "text2sql": TEXT2SQL_HELDOUT,
+    "code_improvement": CODE_IMPROVEMENT_HELDOUT,
+}
+
 
 def cmd_evolve(args):
     evolver_llm = LLMConfig(model=args.evolver_model) if args.evolver_model else None
@@ -59,7 +102,7 @@ def cmd_evolve(args):
         evolver_llm=evolver_llm,
         worker_llm=worker_llm,
     )
-    domain = Text2SQLDomain()
+    domain = DOMAINS[args.domain]()
     DRQ(domain, cfg).run()
     print(f"\nDone. Champions -> {os.path.join(args.out, 'champions.json')}")
 
@@ -68,10 +111,10 @@ def cmd_generality(args):
     if args.heldout:
         with open(args.heldout) as f:
             raw = json.load(f)
-        heldout = [Challenge(**c) for c in raw]
+        heldout = [DOMAIN_CHALLENGE[args.domain](**c) for c in raw]
     else:
-        heldout = HELDOUT
-    domain = Text2SQLDomain()
+        heldout = HELDOUT[args.domain]
+    domain = DOMAINS[args.domain]()
     worker = LLMClient(DRQConfig().llm)
     curve = evaluate_lineage(args.champions, heldout, worker, domain)
     out = os.path.join(args.out, "generality.json")
@@ -85,6 +128,8 @@ def main():
     sub = p.add_subparsers(required=True)
 
     e = sub.add_parser("evolve")
+    e.add_argument("--domain", choices=sorted(DOMAINS), default="text2sql",
+                   help="which domain to evolve (default: text2sql)")
     e.add_argument("--rounds", type=int, default=12)
     e.add_argument("--history-k", type=int, default=0, help="0 = full history")
     e.add_argument("--iterations", type=int, default=40)
@@ -102,6 +147,8 @@ def main():
     e.set_defaults(func=cmd_evolve)
 
     g = sub.add_parser("generality")
+    g.add_argument("--domain", choices=sorted(DOMAINS), default="text2sql",
+                   help="which domain's held-out set / challenge type to use")
     g.add_argument("--champions", required=True)
     g.add_argument("--out", default="runs/default")
     g.add_argument("--heldout", default=None, metavar="PATH",

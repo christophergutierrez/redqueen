@@ -39,6 +39,47 @@ python run.py generality --champions runs/sql1/champions.json --out runs/sql1
 
 ---
 
+## Domains
+
+The evolvable target is selected with `--domain` (default `text2sql`):
+
+| `--domain` | Genome | Challenge | Objective fitness signal |
+|------------|--------|-----------|--------------------------|
+| `text2sql` | a SQL system prompt | `(schema, question, gold_sql)` | predicted SQL's result set matches gold on a throwaway DuckDB |
+| `code_improvement` | a bug-fixing system prompt | a self-contained mini-project (buggy file + `test_target.py` + proven gold fix) | the worker's patched file makes a **fixed** `pytest` command exit 0 in an ephemeral sandbox |
+
+### Running the `code_improvement` domain in mock mode
+
+The `code_improvement` domain uses `pytest` as its runtime verifier, so install
+the package normally or with dev tools before running it:
+
+```bash
+python -m pip install -e .[dev]
+```
+
+```bash
+# offline smoke test — runs the full co-evolution loop with no model
+DRQ_LLM_MOCK=1 python run.py evolve --domain code_improvement \
+  --rounds 2 --iterations 3 --init-random 2 --batch 2 --out runs/ci_smoke
+
+# generality of the champion lineage against the built-in held-out code set
+python run.py generality --domain code_improvement \
+  --champions runs/ci_smoke/champions.json --out runs/ci_smoke
+```
+
+As with `text2sql`, **mock-mode fitness is always 0.0**: the mock worker cannot
+emit a valid Python patch, so no sandbox test passes. The loop structure still runs
+and produces valid output files — mock mode validates plumbing, not fitness. For a
+meaningful run, point `OPENAI_BASE_URL`/`DRQ_MODEL` at a real coding model.
+
+**Safety.** This domain executes model-generated Python. Each evaluation runs in its
+own `tempfile.TemporaryDirectory`; the verify command is a fixed module constant
+(`VERIFY_CMD`) that is **never** taken from model output; written paths are confined
+to the sandbox; and the subprocess has a hard timeout. Run it in a trusted local
+environment.
+
+---
+
 ## 1. System prompt template (domain description for the evolver)
 
 `Text2SQLDomain.system_prompt()` frames the evolver's job — *it evolves prompts,
