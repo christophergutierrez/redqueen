@@ -40,3 +40,7 @@ class DRQConfig:
     out_dir: str = "runs/default"
     llm: LLMConfig = field(default_factory=LLMConfig)
     me: MapElitesConfig = field(default_factory=MapElitesConfig)
+    # Override evolver or worker model independently (None falls back to llm)
+    evolver_llm: LLMConfig | None = None
+    worker_llm: LLMConfig | None = None
+    challenges_per_round: int = 3      # target number of adversary challenges per round

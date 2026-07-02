@@ -12,11 +12,11 @@ from __future__ import annotations
 import json
 from typing import Sequence
 
-from .domains.text2sql import Challenge, Text2SQLDomain, exec_match, extract_sql
+from .domains.text2sql import Challenge, exec_match, extract_sql
 from .llm import LLMClient
 
 
-def generality(domain: Text2SQLDomain, champion_genome: str,
+def generality(champion_genome: str,
                heldout: Sequence[Challenge], worker: LLMClient) -> dict:
     correct = 0
     per_tag: dict[str, list[int]] = {}
@@ -36,14 +36,14 @@ def generality(domain: Text2SQLDomain, champion_genome: str,
     }
 
 
-def evaluate_lineage(domain: Text2SQLDomain, champions_json: str,
+def evaluate_lineage(champions_json: str,
                      heldout: Sequence[Challenge], worker: LLMClient) -> list[dict]:
     """Score every round's champion against the same held-out set -> generality curve."""
     with open(champions_json) as f:
         champs = json.load(f)
     curve = []
     for c in champs:
-        g = generality(domain, c["genome"], heldout, worker)
+        g = generality(c["genome"], heldout, worker)
         curve.append({"round": c["round"], "train_fitness": c["fitness"], **g})
         print(f"[gen] round {c['round']:>2} "
               f"train={c['fitness']:.3f} heldout_generality={g['generality']:.3f}")

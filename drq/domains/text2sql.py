@@ -245,6 +245,9 @@ class Text2SQLDomain:
                 "per_tag_acc": {t: sum(v) / len(v) for t, v in per_tag.items()}}
         return acc, beh, meta
 
+    def wrap_opponent(self, round_idx: int, challenges: list) -> "ChallengeSet":
+        return ChallengeSet(round=round_idx, challenges=challenges)
+
 
 @dataclass
 class ChallengeSet:

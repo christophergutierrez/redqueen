@@ -39,7 +39,8 @@ class Domain(Protocol):
         """Discretize a behavior descriptor into an archive cell."""
         ...
 
-    def fitness(self, genome: Any, opponents: Sequence[Any], seed: int) -> tuple[float, tuple[float, ...], dict]:
+    def fitness(self, genome: Any, opponents: Sequence[Any], seed: int,
+               worker_llm: "LLMClient | None" = None) -> tuple[float, tuple[float, ...], dict]:
         """Score `genome` in the environment defined by `opponents`.
 
         Returns (fitness, raw_behavior, meta). This is where the simulation /
@@ -51,6 +52,10 @@ class Domain(Protocol):
     def new_challenge(self, llm: LLMClient, target_genome: Any) -> Any:
         """Adversary population: propose a challenge that breaks `target_genome`."""
         return None
+
+    def wrap_opponent(self, round_idx: int, challenges: list) -> Any:
+        """Package a list of challenges into the domain's opponent type."""
+        return challenges
 
     def is_coevolutionary(self) -> bool:
         return False

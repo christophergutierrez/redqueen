@@ -15,7 +15,7 @@ import argparse
 import json
 import os
 
-from drq.config import DRQConfig, MapElitesConfig
+from drq.config import DRQConfig, LLMConfig, MapElitesConfig
 from drq.domains.text2sql import Challenge, Text2SQLDomain
 from drq.drq import DRQ
 from drq.generality import evaluate_lineage
@@ -44,14 +44,19 @@ HELDOUT = [
 
 
 def cmd_evolve(args):
+    evolver_llm = LLMConfig(model=args.evolver_model) if args.evolver_model else None
+    worker_llm = LLMConfig(model=args.worker_model, temperature=0.0) if args.worker_model else None
     cfg = DRQConfig(
         rounds=args.rounds,
         history_k=args.history_k,
         out_dir=args.out,
         eval_workers=args.workers,
+        seed=args.seed,
         me=MapElitesConfig(iterations=args.iterations,
                            init_random=args.init_random,
                            batch_size=args.batch),
+        evolver_llm=evolver_llm,
+        worker_llm=worker_llm,
     )
     domain = Text2SQLDomain()
     DRQ(domain, cfg).run()
@@ -59,9 +64,14 @@ def cmd_evolve(args):
 
 
 def cmd_generality(args):
-    domain = Text2SQLDomain()
+    if args.heldout:
+        with open(args.heldout) as f:
+            raw = json.load(f)
+        heldout = [Challenge(**c) for c in raw]
+    else:
+        heldout = HELDOUT
     worker = LLMClient(DRQConfig().llm)
-    curve = evaluate_lineage(domain, args.champions, HELDOUT, worker)
+    curve = evaluate_lineage(args.champions, heldout, worker)
     out = os.path.join(args.out, "generality.json")
     with open(out, "w") as f:
         json.dump(curve, f, indent=2)
@@ -79,12 +89,19 @@ def main():
     e.add_argument("--init-random", type=int, default=8)
     e.add_argument("--batch", type=int, default=4)
     e.add_argument("--workers", type=int, default=8)
+    e.add_argument("--seed", type=int, default=0)
+    e.add_argument("--evolver-model", default=None, metavar="MODEL",
+                   help="override model for the evolver LLM (default: uses DRQ_MODEL env var)")
+    e.add_argument("--worker-model", default=None, metavar="MODEL",
+                   help="override model for the worker LLM (default: uses DRQ_MODEL env var)")
     e.add_argument("--out", default="runs/default")
     e.set_defaults(func=cmd_evolve)
 
     g = sub.add_parser("generality")
     g.add_argument("--champions", required=True)
     g.add_argument("--out", default="runs/default")
+    g.add_argument("--heldout", default=None, metavar="PATH",
+                   help="JSON file with held-out challenges; defaults to builtin set")
     g.set_defaults(func=cmd_generality)
 
     args = p.parse_args()

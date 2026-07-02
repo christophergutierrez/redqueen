@@ -25,7 +25,6 @@ from typing import Any
 
 from .archive import Entity, MapElites
 from .config import DRQConfig
-from .domains.text2sql import ChallengeSet, Text2SQLDomain
 from .llm import LLMClient
 
 
@@ -34,15 +33,15 @@ class DRQ:
         self.domain = domain
         self.cfg = cfg
         self.rng = random.Random(cfg.seed)
-        self.evolver = LLMClient(cfg.llm)   # high-temp generation/mutation operator
-        self.worker = LLMClient(cfg.llm)    # temp=0 executor for scoring solver prompts
-        self.opponents: list[ChallengeSet] = []   # growing history {C_0..C_{t-1}}
-        self.champions: list[Entity] = []          # solver champion per round
+        self.evolver = LLMClient(cfg.evolver_llm or cfg.llm)
+        self.worker = LLMClient(cfg.worker_llm or cfg.llm)
+        self.opponents: list[Any] = []   # growing history {C_0..C_{t-1}}
+        self.champions: list[Entity] = []  # solver champion per round
         os.makedirs(cfg.out_dir, exist_ok=True)
         self._log_path = os.path.join(cfg.out_dir, "run.jsonl")
 
     # ------------------------------------------------------------------ eval
-    def _active_opponents(self) -> list[ChallengeSet]:
+    def _active_opponents(self) -> list[Any]:
         if self.cfg.history_k and self.cfg.history_k > 0:
             return self.opponents[-self.cfg.history_k:]
         return self.opponents  # full history = paper's "full DRQ"
@@ -58,10 +57,10 @@ class DRQ:
             return list(ex.map(lambda g: self._score(g, self.rng.randint(0, 1 << 30)), genomes))
 
     # --------------------------------------------------------- adversary step
-    def _adversary_step(self, round_idx: int, champion: Entity | None) -> ChallengeSet:
+    def _adversary_step(self, round_idx: int, champion: Entity | None) -> Any:
         """Evolve a challenge-set targeting the current champion solver."""
         target = champion.genome if champion else self.domain.new_genome(self.evolver)
-        n_want = 3
+        n_want = self.cfg.challenges_per_round
         challenges = []
         tries = 0
         while len(challenges) < n_want and tries < n_want * 4:
@@ -72,7 +71,7 @@ class DRQ:
         # round 0 falls back to seeds if the adversary produced nothing usable
         if not challenges:
             challenges = list(self.domain.seed_challenges)
-        return ChallengeSet(round=round_idx, challenges=challenges)
+        return self.domain.wrap_opponent(round_idx, challenges)
 
     # ------------------------------------------------------------ solver step
     def _solver_step(self) -> MapElites:
