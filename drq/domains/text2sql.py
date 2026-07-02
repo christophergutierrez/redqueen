@@ -1,0 +1,256 @@
+"""Text2SQL domain with genuine Red Queen co-evolution.
+
+Two populations:
+  SOLVER   — an LLM *system prompt* (the evolved entity). Given a schema + a
+             natural-language question, the worker-LLM uses this prompt to emit
+             SQL. Good prompts generalize across schemas and question styles.
+  CHALLENGE — an adversarial (schema, question, gold_sql) triple. The adversary
+             evolves challenges that the *current champion solver* gets wrong.
+
+DRQ outer loop: each round the adversary produces a new champion CHALLENGE-SET
+(the hardest questions it can find against the reigning solver). The solver
+population must then evolve to answer ALL historical challenge-sets — a growing
+set of opponents, exactly as in the paper. Robustness to "changing workloads and
+schemas" is literally generality against held-out challenge-sets.
+
+Fitness of a solver = fraction of challenge questions it answers correctly
+(execution-accuracy: result set of predicted SQL == result set of gold SQL on a
+throwaway DuckDB instance), averaged over the opponent challenge-sets.
+
+Behavior descriptor (for MAP-Elites diversity):
+  axis 0: prompt length in tokens (rough proxy: whitespace-split words)
+  axis 1: "reasoning-ness" — does the prompt ask for step-by-step / CTE / planning?
+These are cheap, static, and give a spread of qualitatively different prompts.
+"""
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass, field
+from typing import Any, Sequence
+
+import duckdb
+
+from ..archive import Entity, lin_bin
+from ..llm import LLMClient
+
+# --------------------------------------------------------------------------- #
+# Challenge representation                                                     #
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class Challenge:
+    schema_sql: str        # CREATE TABLE ... ; INSERT ... ; (self-contained DDL+data)
+    question: str          # natural-language question
+    gold_sql: str          # reference query producing the correct answer
+    tags: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {"schema_sql": self.schema_sql, "question": self.question,
+                "gold_sql": self.gold_sql, "tags": self.tags}
+
+
+# A seed challenge-set so round 0 has something to optimize against.
+SEED_CHALLENGES: list[Challenge] = [
+    Challenge(
+        schema_sql=(
+            "CREATE TABLE orders(id INTEGER, customer TEXT, amount DECIMAL(10,2), status TEXT);"
+            "INSERT INTO orders VALUES "
+            "(1,'acme',100.0,'paid'),(2,'acme',50.0,'refunded'),"
+            "(3,'globex',200.0,'paid'),(4,'globex',NULL,'paid'),(5,'initech',75.0,'pending');"
+        ),
+        question="What is the total paid amount per customer, for customers with at least one paid order?",
+        gold_sql=("SELECT customer, SUM(amount) AS total FROM orders "
+                  "WHERE status='paid' GROUP BY customer ORDER BY customer;"),
+        tags=["group_by", "filter", "null"],
+    ),
+    Challenge(
+        schema_sql=(
+            "CREATE TABLE emp(id INTEGER, name TEXT, dept TEXT, salary INTEGER, mgr INTEGER);"
+            "INSERT INTO emp VALUES "
+            "(1,'a','eng',120,NULL),(2,'b','eng',100,1),(3,'c','eng',100,1),"
+            "(4,'d','sales',90,NULL),(5,'e','sales',95,4);"
+        ),
+        question="For each department, who earns the most? Return dept and name, ties broken alphabetically.",
+        gold_sql=("SELECT dept, name FROM (SELECT dept, name, "
+                  "ROW_NUMBER() OVER (PARTITION BY dept ORDER BY salary DESC, name ASC) rn "
+                  "FROM emp) t WHERE rn=1 ORDER BY dept;"),
+        tags=["window", "rank", "ties"],
+    ),
+]
+
+
+# --------------------------------------------------------------------------- #
+# Execution-accuracy evaluator                                                 #
+# --------------------------------------------------------------------------- #
+
+
+def _run(schema_sql: str, query: str) -> tuple[bool, Any]:
+    """Execute query against a fresh in-memory DuckDB with the given schema.
+    Returns (ok, sorted_rows_or_error)."""
+    try:
+        con = duckdb.connect(":memory:")
+        for stmt in filter(None, (s.strip() for s in schema_sql.split(";"))):
+            con.execute(stmt)
+        rows = con.execute(query).fetchall()
+        con.close()
+        # order-insensitive comparison unless the query itself ordered — we sort
+        # the gold and predicted identically, so ORDER BY correctness is folded in
+        # only when the gold relies on it. Good enough for exec-accuracy.
+        return True, sorted([tuple(str(c) for c in r) for r in rows])
+    except Exception as e:  # noqa: BLE001
+        return False, str(e)
+
+
+def exec_match(schema_sql: str, gold_sql: str, pred_sql: str) -> bool:
+    gold_ok, gold = _run(schema_sql, gold_sql)
+    if not gold_ok:
+        return False  # broken gold -> can't score; treat as miss
+    pred_ok, pred = _run(schema_sql, pred_sql)
+    return pred_ok and pred == gold
+
+
+_SQL_FENCE = re.compile(r"```(?:sql)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+
+
+def extract_sql(text: str) -> str:
+    m = _SQL_FENCE.search(text)
+    if m:
+        return m.group(1).strip()
+    # otherwise take from first SELECT/WITH to end
+    m = re.search(r"\b(WITH|SELECT)\b", text, re.IGNORECASE)
+    return text[m.start():].strip() if m else text.strip()
+
+
+# --------------------------------------------------------------------------- #
+# Domain                                                                       #
+# --------------------------------------------------------------------------- #
+
+_PROMPT_LEN_MAX = 120     # words; upper bound for BD normalization
+_REASON_WORDS = ("step", "plan", "cte", "first", "think", "reason", "list", "restate")
+
+
+class Text2SQLDomain:
+    name = "text2sql"
+
+    def __init__(self, seed_challenges: list[Challenge] | None = None,
+                 len_bins: int = 5, reason_bins: int = 3):
+        self.seed_challenges = seed_challenges or list(SEED_CHALLENGES)
+        self.len_bins = len_bins
+        self.reason_bins = reason_bins
+
+    # -- LLM description -----------------------------------------------------
+    def system_prompt(self) -> str:
+        return (
+            "You are evolving SYSTEM PROMPTS for a downstream Text-to-SQL agent. "
+            "A good system prompt makes a language model reliably translate a natural-"
+            "language question about a given SQL schema into a single correct DuckDB "
+            "query. Prompts should generalize across schemas and correctly handle NULLs, "
+            "joins, aggregation, window functions, and tie-breaking. Output ONLY the prompt text."
+        )
+
+    def is_coevolutionary(self) -> bool:
+        return True
+
+    # -- solver population: genome is a system-prompt string -----------------
+    def new_genome(self, llm: LLMClient) -> str:
+        r = llm.chat(
+            system=self.system_prompt(),
+            user=("Write a concise, high-quality system prompt (<= 90 words) for a "
+                  "Text-to-SQL agent targeting DuckDB. It must instruct the model to "
+                  "return ONLY the SQL. Make it robust to NULLs, joins, and ranking."),
+            temperature=llm.cfg.temperature,
+        )
+        return r.text.strip() or "You are a SQL expert. Return ONLY a valid DuckDB SQL query."
+
+    def mutate(self, llm: LLMClient, parent: str) -> str:
+        r = llm.chat(
+            system=self.system_prompt(),
+            user=("Improve the following Text-to-SQL system prompt so it produces more "
+                  "correct DuckDB queries across diverse schemas. Change strategy, not just "
+                  "wording. Keep it <= 90 words. Return ONLY the new prompt.\n\n"
+                  f"CURRENT PROMPT:\n{parent}"),
+            temperature=llm.cfg.temperature,
+        )
+        return r.text.strip() or parent
+
+    # -- adversary population: propose a breaking challenge ------------------
+    def new_challenge(self, llm: LLMClient, target_genome: str) -> Challenge | None:
+        r = llm.chat(
+            system=("You design adversarial Text-to-SQL test cases. Produce a self-contained "
+                    "DuckDB schema (CREATE TABLE + a few INSERTs), a natural-language question "
+                    "that is easy for a human but tricky for an LLM (NULL handling, multi-join, "
+                    "correlated subquery, tie-breaking, or date logic), and the correct gold SQL. "
+                    "Return STRICT JSON with keys schema_sql, question, gold_sql, tags."),
+            user=("Create ONE hard case likely to defeat an agent using this system prompt:\n\n"
+                  f"{target_genome}\n\nReturn ONLY JSON."),
+            temperature=llm.cfg.temperature,
+        )
+        try:
+            txt = r.text
+            txt = txt[txt.index("{"): txt.rindex("}") + 1]
+            d = json.loads(txt)
+            ch = Challenge(schema_sql=d["schema_sql"], question=d["question"],
+                           gold_sql=d["gold_sql"], tags=list(d.get("tags", [])))
+            # validate gold executes before admitting it
+            ok, _ = _run(ch.schema_sql, ch.gold_sql)
+            return ch if ok else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    # -- behavior descriptor / cell -----------------------------------------
+    def behavior(self, genome: str, eval_ctx: dict) -> tuple[float, ...]:
+        words = genome.split()
+        n = len(words)
+        low = genome.lower()
+        reason = sum(low.count(w) for w in _REASON_WORDS)
+        return (float(n), float(reason))
+
+    def cell(self, behavior: tuple[float, ...]) -> tuple[int, ...]:
+        n, reason = behavior
+        return (
+            lin_bin(n, 5, _PROMPT_LEN_MAX, self.len_bins),
+            lin_bin(reason, 0, 6, self.reason_bins),
+        )
+
+    # -- fitness: exec-accuracy over opponent challenge-sets -----------------
+    def fitness(self, genome: str, opponents: Sequence["ChallengeSet"], seed: int,
+                worker_llm: LLMClient | None = None) -> tuple[float, tuple[float, ...], dict]:
+        """`opponents` is a list of ChallengeSet (each a champion from a prior round).
+        Fitness = mean exec-accuracy across every challenge in every opponent set."""
+        assert worker_llm is not None, "text2sql needs a worker LLM to run the evolved prompt"
+        challenges: list[Challenge] = []
+        for cs in opponents:
+            challenges.extend(cs.challenges)
+        if not challenges:
+            challenges = list(self.seed_challenges)
+
+        correct = 0
+        per_tag: dict[str, list[int]] = {}
+        for ch in challenges:
+            user = (f"Schema:\n{ch.schema_sql}\n\nQuestion: {ch.question}\n\n"
+                    "Return ONLY the DuckDB SQL query.")
+            res = worker_llm.chat(system=genome, user=user,
+                                  temperature=worker_llm.cfg.worker_temperature)
+            pred = extract_sql(res.text)
+            hit = exec_match(ch.schema_sql, ch.gold_sql, pred)
+            correct += int(hit)
+            for t in (ch.tags or ["untagged"]):
+                per_tag.setdefault(t, []).append(int(hit))
+
+        acc = correct / len(challenges)
+        beh = self.behavior(genome, {})
+        meta = {"n_challenges": len(challenges),
+                "per_tag_acc": {t: sum(v) / len(v) for t, v in per_tag.items()}}
+        return acc, beh, meta
+
+
+@dataclass
+class ChallengeSet:
+    """A champion opponent: the set of hard challenges from one adversary round."""
+    round: int
+    challenges: list[Challenge]
+
+    def to_dict(self) -> dict:
+        return {"round": self.round, "challenges": [c.to_dict() for c in self.challenges]}
