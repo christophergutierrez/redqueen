@@ -160,7 +160,6 @@ class Text2SQLDomain:
             user=("Write a concise, high-quality system prompt (<= 90 words) for a "
                   "Text-to-SQL agent targeting DuckDB. It must instruct the model to "
                   "return ONLY the SQL. Make it robust to NULLs, joins, and ranking."),
-            temperature=llm.cfg.temperature,
         )
         return r.text.strip() or "You are a SQL expert. Return ONLY a valid DuckDB SQL query."
 
@@ -171,7 +170,6 @@ class Text2SQLDomain:
                   "correct DuckDB queries across diverse schemas. Change strategy, not just "
                   "wording. Keep it <= 90 words. Return ONLY the new prompt.\n\n"
                   f"CURRENT PROMPT:\n{parent}"),
-            temperature=llm.cfg.temperature,
         )
         return r.text.strip() or parent
 
@@ -185,7 +183,6 @@ class Text2SQLDomain:
                     "Return STRICT JSON with keys schema_sql, question, gold_sql, tags."),
             user=("Create ONE hard case likely to defeat an agent using this system prompt:\n\n"
                   f"{target_genome}\n\nReturn ONLY JSON."),
-            temperature=llm.cfg.temperature,
         )
         try:
             txt = r.text
@@ -227,8 +224,7 @@ class Text2SQLDomain:
         for ch in challenges:
             user = (f"Schema:\n{ch.schema_sql}\n\nQuestion: {ch.question}\n\n"
                     "Return ONLY the DuckDB SQL query.")
-            res = worker_llm.chat(system=genome, user=user,
-                                  temperature=worker_llm.cfg.worker_temperature)
+            res = worker_llm.chat(system=genome, user=user)
             hit = exec_match(ch.schema_sql, ch.gold_sql, extract_sql(res.text))
             correct += int(hit)
             for t in (ch.tags or ["untagged"]):

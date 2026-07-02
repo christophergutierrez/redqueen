@@ -34,7 +34,7 @@ class DRQ:
         self.cfg = cfg
         self.rng = random.Random(cfg.seed)
         self.evolver = LLMClient(cfg.evolver_llm or cfg.llm)
-        self.worker = LLMClient(cfg.worker_llm or cfg.llm)
+        self.worker = LLMClient((cfg.worker_llm or cfg.llm).as_worker())
         self.opponents: list[Any] = []   # growing history {C_0..C_{t-1}}
         self.champions: list[Entity] = []  # solver champion per round
         os.makedirs(cfg.out_dir, exist_ok=True)

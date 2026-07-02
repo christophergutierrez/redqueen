@@ -29,13 +29,13 @@ class LLMClient:
         self.cfg = cfg
         self._rng = random.Random(0)
 
-    def chat(self, system: str, user: str, temperature: float | None = None,
+    def chat(self, system: str, user: str,
              max_tokens: int | None = None) -> ChatResult:
         if self.cfg.mock:
             return self._mock(system, user)
         payload = {
             "model": self.cfg.model,
-            "temperature": self.cfg.temperature if temperature is None else temperature,
+            "temperature": self.cfg.temperature,
             "max_tokens": max_tokens or self.cfg.max_tokens,
             "messages": [
                 {"role": "system", "content": system},

@@ -114,7 +114,7 @@ class _MockWorker:
         self.cfg = LLMConfig(mock=True)
         self.cfg.worker_temperature = 0.0
 
-    def chat(self, system, user, temperature=None, max_tokens=None):
+    def chat(self, system, user, max_tokens=None):
         return ChatResult(text=self._sql)
 
 

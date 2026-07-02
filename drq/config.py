@@ -5,6 +5,7 @@ finishes in reasonable time against a local model.
 """
 from __future__ import annotations
 
+import dataclasses
 import os
 from dataclasses import dataclass, field
 
@@ -16,11 +17,15 @@ class LLMConfig:
     base_url: str = os.environ.get("OPENAI_BASE_URL", "http://localhost:11434/v1")  # Ollama default
     api_key: str = os.environ.get("OPENAI_API_KEY", "ollama")
     model: str = os.environ.get("DRQ_MODEL", "qwen2.5-coder:32b")
-    temperature: float = 1.0          # high temp for the *evolver* (mutation operator)
-    worker_temperature: float = 0.0   # deterministic *worker* (the entity being scored)
+    temperature: float = 1.0          # resolved temperature used by LLMClient.chat()
+    worker_temperature: float = 0.0   # deterministic temp for worker role; used by as_worker()
     max_tokens: int = 1200
     timeout_s: float = 120.0
     mock: bool = os.environ.get("DRQ_LLM_MOCK", "0") == "1"
+
+    def as_worker(self) -> "LLMConfig":
+        """Return a copy of this config with temperature resolved to worker_temperature."""
+        return dataclasses.replace(self, temperature=self.worker_temperature)
 
 
 @dataclass
