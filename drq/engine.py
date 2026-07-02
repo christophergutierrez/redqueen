@@ -23,6 +23,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from .archive import Entity, MapElites
+from .budget import TokenBudget
 from .config import DRQConfig
 from .domains.base import Domain
 from .llm import LLMClient
@@ -33,10 +34,14 @@ class DRQ:
         self.domain = domain
         self.cfg = cfg
         self.rng = random.Random(cfg.seed)
-        self.evolver = LLMClient(cfg.evolver_llm or cfg.llm)
-        self.worker = LLMClient((cfg.worker_llm or cfg.llm).as_worker())
+        # Shared token ceiling: both roles charge the same budget; the loop halts
+        # cleanly when it is reached (see run()).
+        self.budget = TokenBudget(cfg.token_budget)
+        self.evolver = LLMClient(cfg.evolver_llm or cfg.llm, budget=self.budget)
+        self.worker = LLMClient((cfg.worker_llm or cfg.llm).as_worker(), budget=self.budget)
         self.opponents: list[Any] = []   # growing history {C_0..C_{t-1}}
         self.champions: list[Entity] = []  # solver champion per round
+        self._halted = False               # set True if a run stops on the token budget
         os.makedirs(cfg.out_dir, exist_ok=True)
         self._log_path = os.path.join(cfg.out_dir, "run.jsonl")
 
@@ -63,7 +68,7 @@ class DRQ:
         n_want = self.cfg.challenges_per_round
         challenges: list = []
         tries = 0
-        while len(challenges) < n_want and tries < n_want * 4:
+        while len(challenges) < n_want and tries < n_want * 4 and not self.budget.exceeded():
             ch = self.domain.new_challenge(self.evolver, target)
             tries += 1
             if ch is not None:
@@ -90,6 +95,8 @@ class DRQ:
 
         # inner MAP-Elites iterations
         for _ in range(mecfg.iterations):
+            if self.budget.exceeded():
+                break   # stop spawning work; the outer loop will halt the run
             parents = [me.sample() for _ in range(mecfg.batch_size)]
             children = [self.domain.mutate(self.evolver, p.genome)
                         for p in parents if p is not None]
@@ -101,6 +108,13 @@ class DRQ:
     def run(self) -> list[Entity]:
         champion: Entity | None = None
         for t in range(self.cfg.rounds):
+            if self.budget.exceeded():
+                self._halted = True
+                snap = self.budget.snapshot()
+                print(f"[budget] token ceiling {snap['limit']} reached "
+                      f"({snap['tokens']} tokens over {snap['calls']} calls) "
+                      f"after {t} rounds — halting cleanly.")
+                break
             t0 = time.time()
             # 1. adversary evolves a new opponent challenge-set vs current champion
             cs = self._adversary_step(t, champion)
@@ -116,6 +130,7 @@ class DRQ:
                 "round": t,
                 "elapsed_s": round(time.time() - t0, 1),
                 "timing": timing,
+                "budget": self.budget.snapshot(),
                 "n_opponents": len(self.opponents),
                 "n_challenges_total": sum(len(o.challenges) for o in self._active_opponents()),
                 "archive_coverage": me.coverage(),

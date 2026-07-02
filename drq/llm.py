@@ -14,6 +14,7 @@ import random
 import urllib.request
 from dataclasses import dataclass
 
+from .budget import TokenBudget
 from .config import LLMConfig
 
 
@@ -25,14 +26,17 @@ class ChatResult:
 
 
 class LLMClient:
-    def __init__(self, cfg: LLMConfig):
+    def __init__(self, cfg: LLMConfig, budget: "TokenBudget | None" = None):
         self.cfg = cfg
         self._rng = random.Random(0)
+        self.budget = budget
 
     def chat(self, system: str, user: str,
              max_tokens: int | None = None) -> ChatResult:
         if self.cfg.mock:
-            return self._mock(system, user)
+            res = self._mock(system, user)
+            self._account(system, user, res, None)
+            return res
         payload = {
             "model": self.cfg.model,
             "temperature": self.cfg.temperature,
@@ -53,9 +57,26 @@ class LLMClient:
         try:
             with urllib.request.urlopen(req, timeout=self.cfg.timeout_s) as resp:
                 data = json.loads(resp.read())
-            return ChatResult(text=data["choices"][0]["message"]["content"])
+            res = ChatResult(text=data["choices"][0]["message"]["content"])
+            self._account(system, user, res, data.get("usage"))
+            return res
         except Exception as e:  # noqa: BLE001 - surface everything as a soft failure
-            return ChatResult(text="", ok=False, error=str(e))
+            res = ChatResult(text="", ok=False, error=str(e))
+            self._account(system, user, res, None)
+            return res
+
+    def _account(self, system: str, user: str, res: ChatResult,
+                 usage: dict | None) -> None:
+        """Charge this call against the shared token budget. Uses the API's
+        reported usage when present, else a ~4-chars/token estimate over the
+        prompt + completion (so mock/usage-less servers still accrue)."""
+        if self.budget is None:
+            return
+        if usage and usage.get("total_tokens"):
+            tok = int(usage["total_tokens"])
+        else:
+            tok = (len(system) + len(user) + len(res.text)) // 4
+        self.budget.add(tok)
 
     # ------------------------------------------------------------------ mock
     def _mock(self, system: str, user: str) -> ChatResult:

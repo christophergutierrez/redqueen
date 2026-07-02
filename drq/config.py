@@ -49,3 +49,8 @@ class DRQConfig:
     evolver_llm: LLMConfig | None = None
     worker_llm: LLMConfig | None = None
     challenges_per_round: int = 3      # target number of adversary challenges per round
+    # Cumulative token ceiling for the whole run; the engine halts cleanly when hit.
+    # A default full run is ~50-115M tokens, so 500M is a runaway/cost guard with
+    # ample headroom, not a normal bound. 0 = unlimited. Lower it (e.g. 5_000_000)
+    # when pointing at a paid API.
+    token_budget: int = 500_000_000

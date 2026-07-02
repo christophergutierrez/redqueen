@@ -56,6 +56,9 @@ evolve:
   --history-k INT         0 = full opponent history; N = last N rounds only (default 0)
   --seed INT              RNG seed for reproducibility (default 0)
   --challenges-per-round  adversary target challenges per round (default 3)
+  --token-budget INT      cumulative token ceiling; run halts cleanly when hit
+                          (default 500_000_000 ~ runaway guard; 0 = unlimited;
+                          lower to ~5_000_000 for a paid API)
   --evolver-model MODEL   override model for mutation/generation LLM
   --worker-model MODEL    override model for eval/scoring LLM (deterministic temp=0)
   --out DIR               output directory (run.jsonl, champions.json, opponents.json)
@@ -102,7 +105,7 @@ generality:
 
 | File | Content |
 |------|---------|
-| `run.jsonl` | One JSON line per round: fitness, QD-score, coverage, challenge tags, `timing` ({llm_s, verify_s, llm_calls, verify_calls} — where the round's wall-clock went; summed across the eval thread pool, so the ratio matters, not the absolute totals) |
+| `run.jsonl` | One JSON line per round: fitness, QD-score, coverage, challenge tags, `timing` ({llm_s, verify_s, llm_calls, verify_calls} — where the round's wall-clock went; summed across the eval thread pool, so the ratio matters, not the absolute totals), `budget` ({tokens, calls, limit} — cumulative token spend and ceiling) |
 | `champions.json` | Array of `{round, fitness, genome, cell}` — one per round |
 | `opponents.json` | Full opponent history as serialized ChallengeSets |
 | `generality.json` | Per-round `{generality, train_fitness, per_tag}` curve |
