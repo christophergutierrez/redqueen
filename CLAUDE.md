@@ -102,7 +102,7 @@ generality:
 
 | File | Content |
 |------|---------|
-| `run.jsonl` | One JSON line per round: fitness, QD-score, coverage, challenge tags |
+| `run.jsonl` | One JSON line per round: fitness, QD-score, coverage, challenge tags, `timing` ({llm_s, verify_s, llm_calls, verify_calls} — where the round's wall-clock went; summed across the eval thread pool, so the ratio matters, not the absolute totals) |
 | `champions.json` | Array of `{round, fitness, genome, cell}` — one per round |
 | `opponents.json` | Full opponent history as serialized ChallengeSets |
 | `generality.json` | Per-round `{generality, train_fitness, per_tag}` curve |

@@ -35,11 +35,13 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, field
 from typing import Sequence
 
 from ..archive import lin_bin
 from ..llm import LLMClient
+from ..timing import EvalTimer
 
 # The verify command is FIXED here and never read from a challenge / model output.
 VERIFY_CMD = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"]
@@ -273,6 +275,11 @@ class CodeImprovementDomain:
         self.seed_challenges = seed_challenges or list(SEED_CHALLENGES)
         self.len_bins = len_bins
         self.process_bins = process_bins
+        self.timer = EvalTimer()
+
+    def pop_timing(self) -> dict:
+        """Return and reset accumulated LLM vs verify timing for the last round."""
+        return self.timer.pop()
 
     # -- LLM description -----------------------------------------------------
     def system_prompt(self) -> str:
@@ -314,6 +321,7 @@ class CodeImprovementDomain:
 
     # -- adversary population: propose a breaking challenge ------------------
     def new_challenge(self, llm: LLMClient, target_genome: str) -> CodeChallenge | None:
+        t0 = time.perf_counter()
         r = llm.chat(
             system=("You design adversarial Python bug-fix test cases. Produce a small "
                     "self-contained project: a buggy target module, a pytest test file "
@@ -325,6 +333,7 @@ class CodeImprovementDomain:
             user=("Create ONE hard bug likely to defeat an agent using this system "
                   f"prompt:\n\n{target_genome}\n\nReturn ONLY JSON."),
         )
+        self.timer.add_llm(time.perf_counter() - t0)
         try:
             txt = r.text
             txt = txt[txt.index("{"): txt.rindex("}") + 1]
@@ -344,9 +353,13 @@ class CodeImprovementDomain:
             return None
         # Admission: the bug must be real (buggy fails) AND solvable (gold passes).
         buggy = ch.files[ch.target_file]
-        if run_verify(ch.files, ch.target_file, buggy):
+        tv = time.perf_counter()
+        buggy_ok = run_verify(ch.files, ch.target_file, buggy)
+        gold_ok = (not buggy_ok) and run_verify(ch.files, ch.target_file, ch.gold_content)
+        self.timer.add_verify(time.perf_counter() - tv)
+        if buggy_ok:
             return None   # buggy already passes -> vacuous challenge
-        if not run_verify(ch.files, ch.target_file, ch.gold_content):
+        if not gold_ok:
             return None   # gold does not pass -> unsolvable / broken challenge
         return ch
 
@@ -381,11 +394,15 @@ class CodeImprovementDomain:
                     f"```python\n{current}\n```\n\n"
                     "Return the corrected FULL contents of the file in a single "
                     "```python code block.")
+            t0 = time.perf_counter()
             res = worker_llm.chat(system=genome, user=user)
+            self.timer.add_llm(time.perf_counter() - t0)
             if not res.ok:
                 hit = False  # LLM call failed; treat as miss, not correct
             else:
+                t1 = time.perf_counter()
                 hit = run_verify(ch.files, ch.target_file, extract_patch(res.text))
+                self.timer.add_verify(time.perf_counter() - t1)
             correct += int(hit)
             for t in (ch.tags or ["untagged"]):
                 per_tag.setdefault(t, []).append(int(hit))

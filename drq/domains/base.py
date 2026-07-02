@@ -68,3 +68,12 @@ class Domain(Protocol):
 
     def is_coevolutionary(self) -> bool:
         return False
+
+    def pop_timing(self) -> dict:
+        """Return and reset accumulated evaluation timing (seconds). Optional.
+
+        When implemented, keys are: llm_s, verify_s, llm_calls, verify_calls.
+        The engine records this per round so run.jsonl shows where the wall-clock
+        went (model generation vs. verification). Default: no timing.
+        """
+        return {}

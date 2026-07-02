@@ -260,3 +260,46 @@ def test_challenge_roundtrips_through_dict():
     rebuilt = CodeChallenge(**d)
     assert rebuilt.target_file == ch.target_file
     assert rebuilt.gold_content == ch.gold_content
+
+
+# --------------------------------------------------------------------------- #
+# Timing instrumentation                                                       #
+# --------------------------------------------------------------------------- #
+
+
+def test_eval_timer_accumulates_and_resets():
+    from drq.timing import EvalTimer
+    t = EvalTimer()
+    t.add_llm(0.5)
+    t.add_verify(0.2)
+    t.add_verify(0.3)
+    d = t.pop()
+    assert d["llm_s"] == 0.5
+    assert d["verify_s"] == 0.5
+    assert d["llm_calls"] == 1
+    assert d["verify_calls"] == 2
+    # pop resets to zero
+    d2 = t.pop()
+    assert d2 == {"llm_s": 0.0, "verify_s": 0.0, "llm_calls": 0, "verify_calls": 0}
+
+
+def test_score_populates_timing_and_resets():
+    d = CodeImprovementDomain()
+    ch = SEED_CHALLENGES[0]
+    d.score_challenges("genome", [ch], GoldWorker(ch.gold_content))
+    timing = d.pop_timing()
+    assert timing["llm_calls"] == 1       # one worker chat
+    assert timing["verify_calls"] == 1    # one sandbox pytest run
+    assert timing["verify_s"] > 0.0       # subprocess actually ran
+    # popped -> next round starts clean
+    assert d.pop_timing()["llm_calls"] == 0
+
+
+def test_failed_call_records_llm_but_not_verify():
+    """A failed worker call is timed as an LLM call but skips verification."""
+    d = CodeImprovementDomain()
+    ch = SEED_CHALLENGES[0]
+    d.score_challenges("genome", [ch], FailWorker())
+    timing = d.pop_timing()
+    assert timing["llm_calls"] == 1
+    assert timing["verify_calls"] == 0

@@ -109,10 +109,13 @@ class DRQ:
             me = self._solver_step()
             champion = me.best()
             self.champions.append(champion)
+            # collect where this round's wall-clock went (LLM vs verify); optional hook
+            timing: dict = getattr(self.domain, "pop_timing", lambda: {})()
             # 3. record
             rec = {
                 "round": t,
                 "elapsed_s": round(time.time() - t0, 1),
+                "timing": timing,
                 "n_opponents": len(self.opponents),
                 "n_challenges_total": sum(len(o.challenges) for o in self._active_opponents()),
                 "archive_coverage": me.coverage(),
@@ -124,9 +127,11 @@ class DRQ:
                 "new_challenge_tags": [c.tags for c in cs.challenges],
             }
             self._append_log(rec)
+            tinfo = (f" llm={timing['llm_s']}s vrf={timing['verify_s']}s"
+                     if timing else "")
             print(f"[round {t:>2}] fit={rec['champion_fitness']} "
                   f"cov={rec['archive_coverage']} qd={rec['qd_score']} "
-                  f"opp={rec['n_opponents']} ({rec['elapsed_s']}s)")
+                  f"opp={rec['n_opponents']} ({rec['elapsed_s']}s){tinfo}")
         self._dump_final()
         return self.champions
 

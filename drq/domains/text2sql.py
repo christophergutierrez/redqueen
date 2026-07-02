@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
@@ -33,6 +34,7 @@ import duckdb
 
 from ..archive import lin_bin
 from ..llm import LLMClient
+from ..timing import EvalTimer
 
 # --------------------------------------------------------------------------- #
 # Challenge representation                                                     #
@@ -142,6 +144,11 @@ class Text2SQLDomain:
         self.seed_challenges = seed_challenges or list(SEED_CHALLENGES)
         self.len_bins = len_bins
         self.reason_bins = reason_bins
+        self.timer = EvalTimer()
+
+    def pop_timing(self) -> dict:
+        """Return and reset accumulated LLM vs verify timing for the last round."""
+        return self.timer.pop()
 
     # -- LLM description -----------------------------------------------------
     def system_prompt(self) -> str:
@@ -178,6 +185,7 @@ class Text2SQLDomain:
 
     # -- adversary population: propose a breaking challenge ------------------
     def new_challenge(self, llm: LLMClient, target_genome: str) -> Challenge | None:
+        t0 = time.perf_counter()
         r = llm.chat(
             system=("You design adversarial Text-to-SQL test cases. Produce a self-contained "
                     "DuckDB schema (CREATE TABLE + a few INSERTs), a natural-language question "
@@ -187,6 +195,7 @@ class Text2SQLDomain:
             user=("Create ONE hard case likely to defeat an agent using this system prompt:\n\n"
                   f"{target_genome}\n\nReturn ONLY JSON."),
         )
+        self.timer.add_llm(time.perf_counter() - t0)
         try:
             txt = r.text
             txt = txt[txt.index("{"): txt.rindex("}") + 1]
@@ -194,7 +203,9 @@ class Text2SQLDomain:
             ch = Challenge(schema_sql=d["schema_sql"], question=d["question"],
                            gold_sql=d["gold_sql"], tags=list(d.get("tags", [])))
             # validate gold executes before admitting it
+            tv = time.perf_counter()
             ok, _ = _run(ch.schema_sql, ch.gold_sql)
+            self.timer.add_verify(time.perf_counter() - tv)
             return ch if ok else None
         except Exception:  # noqa: BLE001
             return None
@@ -227,11 +238,15 @@ class Text2SQLDomain:
         for ch in challenges:
             user = (f"Schema:\n{ch.schema_sql}\n\nQuestion: {ch.question}\n\n"
                     "Return ONLY the DuckDB SQL query.")
+            t0 = time.perf_counter()
             res = worker_llm.chat(system=genome, user=user)
+            self.timer.add_llm(time.perf_counter() - t0)
             if not res.ok:
                 hit = False  # LLM call failed; treat as miss, not correct
             else:
+                t1 = time.perf_counter()
                 hit = exec_match(ch.schema_sql, ch.gold_sql, extract_sql(res.text))
+                self.timer.add_verify(time.perf_counter() - t1)
             correct += int(hit)
             for t in (ch.tags or ["untagged"]):
                 per_tag.setdefault(t, []).append(int(hit))

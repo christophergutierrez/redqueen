@@ -181,6 +181,19 @@ def test_score_challenges_wrong():
     assert result["accuracy"] == pytest.approx(0.0)
 
 
+def test_score_challenges_records_timing():
+    domain = Text2SQLDomain()
+    schema = ("CREATE TABLE t(id INTEGER, v INTEGER);"
+              "INSERT INTO t VALUES (1,10),(2,20);")
+    ch = Challenge(schema_sql=schema, question="Sum of v?",
+                   gold_sql="SELECT SUM(v) FROM t;", tags=["agg"])
+    domain.score_challenges("g", [ch], _MockWorker("SELECT SUM(v) FROM t;"))
+    timing = domain.pop_timing()
+    assert timing["llm_calls"] == 1       # one worker chat
+    assert timing["verify_calls"] == 1    # one DuckDB exec_match
+    assert domain.pop_timing()["llm_calls"] == 0   # reset after pop
+
+
 def test_score_challenges_empty_list():
     domain = Text2SQLDomain()
     worker = _MockWorker("SELECT 1;")
