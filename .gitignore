@@ -9,3 +9,5 @@ build/
 .pytest_cache/
 .mypy_cache/
 *.pyc
+.env
+.env.*

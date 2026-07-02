@@ -52,6 +52,7 @@ def cmd_evolve(args):
         out_dir=args.out,
         eval_workers=args.workers,
         seed=args.seed,
+        challenges_per_round=args.challenges_per_round,
         me=MapElitesConfig(iterations=args.iterations,
                            init_random=args.init_random,
                            batch_size=args.batch),
@@ -91,6 +92,8 @@ def main():
     e.add_argument("--batch", type=int, default=4)
     e.add_argument("--workers", type=int, default=8)
     e.add_argument("--seed", type=int, default=0)
+    e.add_argument("--challenges-per-round", type=int, default=3,
+                   help="target number of adversary challenges per round")
     e.add_argument("--evolver-model", default=None, metavar="MODEL",
                    help="override model for the evolver LLM (default: uses DRQ_MODEL env var)")
     e.add_argument("--worker-model", default=None, metavar="MODEL",

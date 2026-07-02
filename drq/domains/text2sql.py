@@ -31,7 +31,7 @@ from typing import Any, Sequence
 
 import duckdb
 
-from ..archive import Entity, lin_bin
+from ..archive import lin_bin
 from ..llm import LLMClient
 
 # --------------------------------------------------------------------------- #
@@ -89,18 +89,21 @@ SEED_CHALLENGES: list[Challenge] = [
 def _run(schema_sql: str, query: str) -> tuple[bool, Any]:
     """Execute query against a fresh in-memory DuckDB with the given schema.
     Returns (ok, sorted_rows_or_error)."""
+    con = None
     try:
         con = duckdb.connect(":memory:")
         for stmt in filter(None, (s.strip() for s in schema_sql.split(";"))):
             con.execute(stmt)
         rows = con.execute(query).fetchall()
-        con.close()
         # order-insensitive comparison unless the query itself ordered — we sort
         # the gold and predicted identically, so ORDER BY correctness is folded in
         # only when the gold relies on it. Good enough for exec-accuracy.
         return True, sorted([tuple(str(c) for c in r) for r in rows])
     except Exception as e:  # noqa: BLE001
         return False, str(e)
+    finally:
+        if con is not None:
+            con.close()
 
 
 def exec_match(schema_sql: str, gold_sql: str, pred_sql: str) -> bool:
@@ -225,7 +228,10 @@ class Text2SQLDomain:
             user = (f"Schema:\n{ch.schema_sql}\n\nQuestion: {ch.question}\n\n"
                     "Return ONLY the DuckDB SQL query.")
             res = worker_llm.chat(system=genome, user=user)
-            hit = exec_match(ch.schema_sql, ch.gold_sql, extract_sql(res.text))
+            if not res.ok:
+                hit = False  # LLM call failed; treat as miss, not correct
+            else:
+                hit = exec_match(ch.schema_sql, ch.gold_sql, extract_sql(res.text))
             correct += int(hit)
             for t in (ch.tags or ["untagged"]):
                 per_tag.setdefault(t, []).append(int(hit))

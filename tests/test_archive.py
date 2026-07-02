@@ -1,7 +1,7 @@
-import math
 import random
 import pytest
 from drq.archive import Entity, MapElites, lin_bin, log_bin
+from drq.domains.text2sql import Text2SQLDomain
 
 
 def _entity(fitness, cell=(0,), genome="g"):
@@ -100,8 +100,6 @@ def test_log_bin_midpoint_above():
 
 # ── cell assignment contract ────────────────────────────────────────────────
 
-from drq.domains.text2sql import Text2SQLDomain
-
 
 def test_cell_stable_for_identical_genomes():
     """Same genome must always map to the same cell (MAP-Elites correctness)."""
@@ -133,7 +131,7 @@ def test_cell_reasoning_axis_increases_with_keywords():
     assert beh_reasoned[1] > beh_plain[1], "reasoning score should be higher for reasoned prompt"
     c_plain = domain.cell(beh_plain)
     c_reasoned = domain.cell(beh_reasoned)
-    assert c_plain[1] <= c_reasoned[1], "reasoning bin should be >= for reasoned prompt"
+    assert c_plain[1] < c_reasoned[1], "reasoning bin must strictly increase"
 
 
 def test_cell_dimensions_in_valid_range():
@@ -159,12 +157,16 @@ def test_best_returns_max_unique():
     me.add(_entity(0.5, cell=(2,), genome="weak"))
     best = me.best()
     assert best.fitness == pytest.approx(0.9)
+    assert me.best() is best  # idempotent — same object returned twice
 
 
 def test_add_equal_fitness_keeps_incumbent():
-    """Equal fitness should NOT displace the incumbent (strictly better required)."""
+    """Equal fitness must NOT displace the incumbent (strictly > required)."""
     me = MapElites(random.Random(0))
     me.add(_entity(0.5, cell=(0,), genome="original"))
-    kept = me.add(_entity(0.5, cell=(0,), genome="challenger"))
-    assert not kept
+    # exact-equal challenger must be rejected
+    assert me.add(_entity(0.5, cell=(0,), genome="challenger")) is False
     assert me.grid[(0,)].genome == "original"
+    # marginally better must replace
+    assert me.add(_entity(0.5001, cell=(0,), genome="better")) is True
+    assert me.grid[(0,)].genome == "better"

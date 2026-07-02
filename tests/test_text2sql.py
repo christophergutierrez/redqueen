@@ -2,7 +2,7 @@ import pytest
 from drq.domains.text2sql import (
     Challenge, ChallengeSet, exec_match, extract_sql, Text2SQLDomain,
 )
-from drq.llm import LLMClient, ChatResult
+from drq.llm import ChatResult
 from drq.config import LLMConfig
 
 
@@ -187,6 +187,7 @@ def test_score_challenges_empty_list():
     result = domain.score_challenges("genome", [], worker)
     assert result["accuracy"] == pytest.approx(0.0)
     assert result["n_challenges"] == 0
+    assert result["per_tag"] == {}
 
 
 def test_score_challenges_mixed():

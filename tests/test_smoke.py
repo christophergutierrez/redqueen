@@ -148,7 +148,7 @@ def test_history_k_limits_active_opponents():
 
 def test_generality_delegates_to_domain():
     """generality.py must not import text2sql internals directly."""
-    import importlib, inspect
+    import inspect
     import drq.generality as gen_mod
     src = inspect.getsource(gen_mod)
     assert "exec_match" not in src, "generality.py must not call exec_match directly"

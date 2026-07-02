@@ -20,16 +20,16 @@ import os
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict
 from typing import Any
 
 from .archive import Entity, MapElites
 from .config import DRQConfig
+from .domains.base import Domain
 from .llm import LLMClient
 
 
 class DRQ:
-    def __init__(self, domain, cfg: DRQConfig):
+    def __init__(self, domain: Domain, cfg: DRQConfig):
         self.domain = domain
         self.cfg = cfg
         self.rng = random.Random(cfg.seed)
@@ -61,7 +61,7 @@ class DRQ:
         """Evolve a challenge-set targeting the current champion solver."""
         target = champion.genome if champion else self.domain.new_genome(self.evolver)
         n_want = self.cfg.challenges_per_round
-        challenges = []
+        challenges: list = []
         tries = 0
         while len(challenges) < n_want and tries < n_want * 4:
             ch = self.domain.new_challenge(self.evolver, target)
@@ -70,7 +70,7 @@ class DRQ:
                 challenges.append(ch)
         # round 0 falls back to seeds if the adversary produced nothing usable
         if not challenges:
-            challenges = list(self.domain.seed_challenges)
+            challenges = list(getattr(self.domain, "seed_challenges", []))
         return self.domain.wrap_opponent(round_idx, challenges)
 
     # ------------------------------------------------------------ solver step

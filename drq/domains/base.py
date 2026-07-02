@@ -13,13 +13,13 @@ from __future__ import annotations
 
 from typing import Any, Protocol, Sequence, runtime_checkable
 
-from ..archive import Entity
 from ..llm import LLMClient
 
 
 @runtime_checkable
 class Domain(Protocol):
     name: str
+    seed_challenges: Sequence  # fallback challenge list used when adversary produces nothing
 
     def system_prompt(self) -> str: ...
 
