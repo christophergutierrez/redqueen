@@ -8,6 +8,10 @@ dist/
 build/
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
 *.pyc
 .env
 .env.*
+# session/planning artifacts
+implementation-plan.md
+.devtribunal/

@@ -17,7 +17,7 @@ import os
 
 from drq.config import DRQConfig, LLMConfig, MapElitesConfig
 from drq.domains.text2sql import Challenge, Text2SQLDomain
-from drq.drq import DRQ
+from drq.engine import DRQ
 from drq.generality import evaluate_lineage
 from drq.llm import LLMClient
 
