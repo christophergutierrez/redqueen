@@ -7,6 +7,7 @@ venv/
 dist/
 build/
 .pytest_cache/
+.fastembed_cache/
 .mypy_cache/
 .ruff_cache/
 *.pyc
