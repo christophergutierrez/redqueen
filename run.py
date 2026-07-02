@@ -70,8 +70,9 @@ def cmd_generality(args):
         heldout = [Challenge(**c) for c in raw]
     else:
         heldout = HELDOUT
+    domain = Text2SQLDomain()
     worker = LLMClient(DRQConfig().llm)
-    curve = evaluate_lineage(args.champions, heldout, worker)
+    curve = evaluate_lineage(args.champions, heldout, worker, domain)
     out = os.path.join(args.out, "generality.json")
     with open(out, "w") as f:
         json.dump(curve, f, indent=2)

@@ -214,6 +214,32 @@ class Text2SQLDomain:
             lin_bin(reason, 0, 6, self.reason_bins),
         )
 
+    # -- shared evaluation kernel used by both fitness() and generality ------
+    def score_challenges(self, genome: str, challenges: list["Challenge"],
+                         worker_llm: LLMClient) -> dict:
+        """Evaluate genome against a specific list of challenges.
+
+        Returns {"accuracy": float, "n_challenges": int, "per_tag": dict}.
+        This is the single place for per-challenge evaluation logic.
+        """
+        correct = 0
+        per_tag: dict[str, list[int]] = {}
+        for ch in challenges:
+            user = (f"Schema:\n{ch.schema_sql}\n\nQuestion: {ch.question}\n\n"
+                    "Return ONLY the DuckDB SQL query.")
+            res = worker_llm.chat(system=genome, user=user,
+                                  temperature=worker_llm.cfg.worker_temperature)
+            hit = exec_match(ch.schema_sql, ch.gold_sql, extract_sql(res.text))
+            correct += int(hit)
+            for t in (ch.tags or ["untagged"]):
+                per_tag.setdefault(t, []).append(int(hit))
+        n = len(challenges)
+        return {
+            "accuracy": correct / n if n else 0.0,
+            "n_challenges": n,
+            "per_tag": {t: sum(v) / len(v) for t, v in per_tag.items()},
+        }
+
     # -- fitness: exec-accuracy over opponent challenge-sets -----------------
     def fitness(self, genome: str, opponents: Sequence["ChallengeSet"], seed: int,
                 worker_llm: LLMClient | None = None) -> tuple[float, tuple[float, ...], dict]:
@@ -226,24 +252,11 @@ class Text2SQLDomain:
         if not challenges:
             challenges = list(self.seed_challenges)
 
-        correct = 0
-        per_tag: dict[str, list[int]] = {}
-        for ch in challenges:
-            user = (f"Schema:\n{ch.schema_sql}\n\nQuestion: {ch.question}\n\n"
-                    "Return ONLY the DuckDB SQL query.")
-            res = worker_llm.chat(system=genome, user=user,
-                                  temperature=worker_llm.cfg.worker_temperature)
-            pred = extract_sql(res.text)
-            hit = exec_match(ch.schema_sql, ch.gold_sql, pred)
-            correct += int(hit)
-            for t in (ch.tags or ["untagged"]):
-                per_tag.setdefault(t, []).append(int(hit))
-
-        acc = correct / len(challenges)
+        result = self.score_challenges(genome, challenges, worker_llm)
         beh = self.behavior(genome, {})
-        meta = {"n_challenges": len(challenges),
-                "per_tag_acc": {t: sum(v) / len(v) for t, v in per_tag.items()}}
-        return acc, beh, meta
+        meta = {"n_challenges": result["n_challenges"],
+                "per_tag_acc": result["per_tag"]}
+        return result["accuracy"], beh, meta
 
     def wrap_opponent(self, round_idx: int, challenges: list) -> "ChallengeSet":
         return ChallengeSet(round=round_idx, challenges=challenges)

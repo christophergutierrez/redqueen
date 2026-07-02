@@ -57,5 +57,14 @@ class Domain(Protocol):
         """Package a list of challenges into the domain's opponent type."""
         return challenges
 
+    def score_challenges(self, genome: Any, challenges: list,
+                         worker_llm: "LLMClient | None" = None) -> dict:
+        """Evaluate genome against a specific challenge list.
+
+        Returns at minimum {"accuracy": float, "n_challenges": int, "per_tag": dict}.
+        Used by generality evaluation so it stays domain-agnostic.
+        """
+        return {}
+
     def is_coevolutionary(self) -> bool:
         return False

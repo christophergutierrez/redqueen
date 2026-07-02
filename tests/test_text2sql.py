@@ -2,6 +2,8 @@ import pytest
 from drq.domains.text2sql import (
     Challenge, ChallengeSet, exec_match, extract_sql, Text2SQLDomain,
 )
+from drq.llm import LLMClient, ChatResult
+from drq.config import LLMConfig
 
 
 SCHEMA = (
@@ -103,3 +105,59 @@ def test_wrap_opponent():
     assert isinstance(cs, ChallengeSet)
     assert cs.round == 0
     assert cs.challenges[0] is ch
+
+
+class _MockWorker:
+    """Minimal LLMClient stand-in that returns a fixed SQL string."""
+    def __init__(self, sql: str):
+        self._sql = sql
+        self.cfg = LLMConfig(mock=True)
+        self.cfg.worker_temperature = 0.0
+
+    def chat(self, system, user, temperature=None, max_tokens=None):
+        return ChatResult(text=self._sql)
+
+
+def test_score_challenges_correct():
+    domain = Text2SQLDomain()
+    schema = ("CREATE TABLE t(id INTEGER, v INTEGER);"
+              "INSERT INTO t VALUES (1,10),(2,20);")
+    ch = Challenge(schema_sql=schema, question="Sum of v?",
+                   gold_sql="SELECT SUM(v) FROM t;", tags=["agg"])
+    worker = _MockWorker("SELECT SUM(v) FROM t;")
+    result = domain.score_challenges("dummy genome", [ch], worker)
+    assert result["accuracy"] == pytest.approx(1.0)
+    assert result["n_challenges"] == 1
+    assert result["per_tag"]["agg"] == pytest.approx(1.0)
+
+
+def test_score_challenges_wrong():
+    domain = Text2SQLDomain()
+    schema = ("CREATE TABLE t(id INTEGER, v INTEGER);"
+              "INSERT INTO t VALUES (1,10),(2,20);")
+    ch = Challenge(schema_sql=schema, question="Sum of v?",
+                   gold_sql="SELECT SUM(v) FROM t;", tags=["agg"])
+    worker = _MockWorker("SELECT COUNT(*) FROM t;")
+    result = domain.score_challenges("dummy genome", [ch], worker)
+    assert result["accuracy"] == pytest.approx(0.0)
+
+
+def test_score_challenges_empty_list():
+    domain = Text2SQLDomain()
+    worker = _MockWorker("SELECT 1;")
+    result = domain.score_challenges("genome", [], worker)
+    assert result["accuracy"] == pytest.approx(0.0)
+    assert result["n_challenges"] == 0
+
+
+def test_score_challenges_mixed():
+    domain = Text2SQLDomain()
+    schema = ("CREATE TABLE t(id INTEGER, v INTEGER);"
+              "INSERT INTO t VALUES (1,10),(2,20);")
+    correct_ch = Challenge(schema, "?", "SELECT SUM(v) FROM t;", ["sum"])
+    wrong_ch = Challenge(schema, "?", "SELECT COUNT(*) FROM t;", ["cnt"])
+    # Worker returns SUM — correct for first, wrong for second
+    worker = _MockWorker("SELECT SUM(v) FROM t;")
+    result = domain.score_challenges("genome", [correct_ch, wrong_ch], worker)
+    assert result["accuracy"] == pytest.approx(0.5)
+    assert result["n_challenges"] == 2
