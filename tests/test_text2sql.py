@@ -43,6 +43,45 @@ def test_exec_match_order_insensitive():
     assert exec_match(SCHEMA, gold, pred) is True
 
 
+def test_exec_match_empty_result_sets():
+    """Both gold and pred returning no rows is a match."""
+    schema = "CREATE TABLE t(id INTEGER, v INTEGER);"
+    gold = "SELECT v FROM t WHERE id = 999;"
+    pred = "SELECT v FROM t WHERE id = 999;"
+    assert exec_match(schema, gold, pred) is True
+
+
+def test_exec_match_empty_gold_nonempty_pred():
+    schema = "CREATE TABLE t(id INTEGER, v INTEGER); INSERT INTO t VALUES (1, 10);"
+    gold = "SELECT v FROM t WHERE id = 999;"  # returns 0 rows
+    pred = "SELECT v FROM t;"                  # returns 1 row
+    assert exec_match(schema, gold, pred) is False
+
+
+def test_exec_match_null_values():
+    """NULL values in result sets must compare correctly."""
+    schema = ("CREATE TABLE t(id INTEGER, v INTEGER);"
+              "INSERT INTO t VALUES (1, NULL), (2, NULL);")
+    gold = "SELECT v FROM t ORDER BY id;"
+    pred = "SELECT v FROM t ORDER BY id;"
+    assert exec_match(schema, gold, pred) is True
+
+
+def test_exec_match_null_vs_value():
+    schema = ("CREATE TABLE t(id INTEGER, v INTEGER);"
+              "INSERT INTO t VALUES (1, NULL);")
+    gold = "SELECT v FROM t;"         # returns NULL
+    pred = "SELECT 0 AS v;"           # returns 0
+    assert exec_match(schema, gold, pred) is False
+
+
+def test_exec_match_pred_without_order_matches_ordered_gold():
+    """Pred without ORDER BY should match gold with ORDER BY on same rows."""
+    gold = "SELECT val FROM t ORDER BY val ASC;"
+    pred = "SELECT val FROM t;"
+    assert exec_match(SCHEMA, gold, pred) is True
+
+
 def test_extract_sql_fenced():
     text = "Here is the answer:\n```sql\nSELECT 1;\n```"
     assert extract_sql(text).strip() == "SELECT 1;"
