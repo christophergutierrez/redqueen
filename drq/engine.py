@@ -107,8 +107,11 @@ class DRQ:
                           cell=cell, meta={"error": str(e)})
 
     def _score_batch(self, genomes: list[Any]) -> list[Entity]:
+        # Generate seeds in the main thread — self.rng is not thread-safe and
+        # would race if called inside the lambda from worker threads.
+        seeds = [self.rng.randint(0, 1 << 30) for _ in genomes]
         with ThreadPoolExecutor(max_workers=self.cfg.eval_workers) as ex:
-            return list(ex.map(lambda g: self._score(g, self.rng.randint(0, 1 << 30)), genomes))
+            return list(ex.map(self._score, genomes, seeds))
 
     # --------------------------------------------------------- adversary step
     def _adversary_step(self, round_idx: int, champion: Entity | None) -> Any:

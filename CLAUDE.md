@@ -65,9 +65,11 @@ evolve:
   --out DIR               output directory (run.jsonl, champions.json, opponents.json)
 
 generality:
+  --domain NAME           which domain's held-out set / challenge type to use (default text2sql)
   --champions PATH        champions.json from an evolve run
   --heldout PATH          JSON file of Challenge objects; omit for built-in set
   --out DIR               writes generality.json
+  --token-budget INT      cumulative token ceiling for the lineage eval (default 500M; 0 = unlimited)
 ```
 
 ## Domain vocabulary (matches the paper)

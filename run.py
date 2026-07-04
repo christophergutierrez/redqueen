@@ -16,6 +16,7 @@ import json
 import os
 
 from drq.config import DRQConfig, LLMConfig, MapElitesConfig
+from drq.budget import TokenBudget
 from drq.domains.code_improvement import CodeChallenge, CodeImprovementDomain
 from drq.domains.text2sql import Challenge, Text2SQLDomain
 from drq.engine import DRQ
@@ -116,10 +117,10 @@ def cmd_generality(args):
     else:
         heldout = HELDOUT[args.domain]
     domain = DOMAINS[args.domain]()
-    # Score generality with the deterministic worker (temp 0.0), matching how
-    # training fitness is evaluated (engine uses .as_worker()); otherwise the
-    # headline curve is hotter and non-reproducible vs. the train_fitness beside it.
-    worker = LLMClient(DRQConfig().llm.as_worker(), role="worker",
+    # Pass a shared budget so a multi-champion generality run has a cost ceiling on
+    # paid APIs, consistent with how the engine wires its worker LLM.
+    budget = TokenBudget(args.token_budget)
+    worker = LLMClient(DRQConfig().llm.as_worker(), role="worker", budget=budget,
                        mock_reply=getattr(domain, "mock_reply", None))
     curve = evaluate_lineage(args.champions, heldout, worker, domain)
     out = os.path.join(args.out, "generality.json")
@@ -129,7 +130,7 @@ def cmd_generality(args):
 
 
 def main():
-    p = argparse.ArgumentParser(description="Digital Red Queen (DRQ) — Text2SQL port")
+    p = argparse.ArgumentParser(description="Digital Red Queen (DRQ) — prompt evolution engine")
     sub = p.add_subparsers(required=True)
 
     e = sub.add_parser("evolve")
@@ -162,6 +163,8 @@ def main():
     g.add_argument("--out", default="runs/default")
     g.add_argument("--heldout", default=None, metavar="PATH",
                    help="JSON file with held-out challenges; defaults to builtin set")
+    g.add_argument("--token-budget", type=int, default=500_000_000, metavar="N",
+                   help="cumulative token ceiling; 0 = unlimited (default 500M)")
     g.set_defaults(func=cmd_generality)
 
     args = p.parse_args()

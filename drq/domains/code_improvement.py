@@ -60,6 +60,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import warnings
 import xml.etree.ElementTree as ET
@@ -182,21 +183,23 @@ def _resolve_in(root: str, rel: str) -> str | None:
 
 
 _UNSANDBOXED_WARNED = False
+_UNSANDBOXED_WARNED_LOCK = threading.Lock()
 
 
 def _warn_unsandboxed_once() -> None:
     global _UNSANDBOXED_WARNED
-    if not _UNSANDBOXED_WARNED:
+    with _UNSANDBOXED_WARNED_LOCK:
+        if _UNSANDBOXED_WARNED:
+            return
         _UNSANDBOXED_WARNED = True
-        warnings.warn(
-            "code_improvement: unprivileged namespaces unavailable — refusing to "
-            "run model-generated code unsandboxed (every verify scores as a miss). "
-            "On such a host, generated code could read parent secrets via "
-            "/proc/<ancestor>/environ and reach the network. Set "
-            "DRQ_ALLOW_UNSANDBOXED=1 to override (only with a trusted model).",
-            RuntimeWarning, stacklevel=3,
-        )
-
+    warnings.warn(
+        "code_improvement: unprivileged namespaces unavailable — refusing to "
+        "run model-generated code unsandboxed (every verify scores as a miss). "
+        "On such a host, generated code could read parent secrets via "
+        "/proc/<ancestor>/environ and reach the network. Set "
+        "DRQ_ALLOW_UNSANDBOXED=1 to override (only with a trusted model).",
+        RuntimeWarning, stacklevel=3,
+    )
 
 def _report_passed(report_path: str) -> bool:
     """Validate a pytest JUnit-XML report the parent controls: at least one test

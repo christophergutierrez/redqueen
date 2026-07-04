@@ -120,7 +120,7 @@ def test_generality_scores_with_worker_temperature(monkeypatch, tmp_path):
     champ.write_text(json.dumps([{"round": 0, "fitness": 0.0,
                                   "genome": "g", "cell": [0, 0]}]))
     args = types.SimpleNamespace(domain="text2sql", champions=str(champ),
-                                 out=str(tmp_path), heldout=None)
+                                 out=str(tmp_path), heldout=None, token_budget=0)
     run.cmd_generality(args)
     assert captured["temperature"] == 0.0
 
