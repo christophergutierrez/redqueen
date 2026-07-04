@@ -25,9 +25,11 @@ These are cheap, static, and give a spread of qualitatively different prompts.
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any, Sequence
 
 import duckdb
@@ -88,19 +90,83 @@ SEED_CHALLENGES: list[Challenge] = [
 # --------------------------------------------------------------------------- #
 
 
+_NULL = "\x00NULL"  # sentinel so a SQL NULL never collides with the string 'None'
+
+
+def _norm_cell(c: Any) -> str:
+    """Canonicalize a result cell so numerically-equal answers compare equal.
+
+    DuckDB returns e.g. SUM over DECIMAL as ``Decimal('150.00')`` but the same
+    logical value via DOUBLE as ``150.0``; without normalization a correct
+    prediction is scored wrong. Integers keep exact string form (no float
+    round-trip, so large IDs are safe); non-integer reals round to 6 places.
+    """
+    if c is None:
+        return _NULL
+    if isinstance(c, bool):
+        # \x00-prefixed so a BOOLEAN true/false never collides with the TEXT
+        # strings 'true'/'false' (which fall through to str(c) below).
+        return "\x00T" if c else "\x00F"
+    if isinstance(c, int):
+        return str(c)
+    if isinstance(c, (float, Decimal)):
+        f = float(c)
+        if not math.isfinite(f):
+            # NaN/inf would raise in int(f); give them a stable sentinel so a
+            # gold whose result is NaN still matches itself (and doesn't crash
+            # _run, which would otherwise score it as a broken query).
+            return f"\x00{f}"          # "\x00nan" | "\x00inf" | "\x00-inf"
+        if f == int(f):
+            return str(int(f))          # integer-valued (any magnitude): exact
+        return format(round(f, 6), ".6f")
+    return str(c)
+
+
+_PAREN = re.compile(r"\([^()]*\)")
+_ORDER_BY = re.compile(r"\border\s+by\b", re.IGNORECASE)
+# String literals ('' escape), quoted identifiers ("" escape), and comments —
+# blanked out before the ORDER BY scan so a literal like 'order by z' or a
+# `-- order by` comment can't be mistaken for a real result-ordering clause.
+_SQL_NOISE = re.compile(
+    r"'(?:[^']|'')*'"        # single-quoted string
+    r'|"(?:[^"]|"")*"'       # double-quoted identifier
+    r"|--[^\n]*"             # line comment
+    r"|/\*.*?\*/",           # block comment
+    re.DOTALL,
+)
+
+
+def _has_top_level_order_by(sql: str) -> bool:
+    """True iff `sql` has an ORDER BY outside any parentheses — i.e. one that
+    orders the final result set, not an ORDER BY inside a window (`OVER (...)`)
+    or a subquery. String/comment noise is blanked first, then parenthesized
+    groups are stripped innermost-first.
+
+    Known residual: a top-level statement that is *itself* fully wrapped in
+    parens — `(SELECT ... ORDER BY ...)` — has its ORDER BY stripped and is
+    treated as unordered. Rare in practice; a full SQL parse would be needed to
+    close it and is deliberately out of scope for this cheap check."""
+    sql = _SQL_NOISE.sub(" ", sql)
+    prev = None
+    while prev != sql:
+        prev = sql
+        sql = _PAREN.sub(" ", sql)
+    return _ORDER_BY.search(sql) is not None
+
+
 def _run(schema_sql: str, query: str) -> tuple[bool, Any]:
     """Execute query against a fresh in-memory DuckDB with the given schema.
-    Returns (ok, sorted_rows_or_error)."""
+    Returns (ok, rows_in_natural_order) with normalized cells (or (False, err)).
+    Rows are NOT sorted here — ordering is decided by exec_match."""
     con = None
     try:
         con = duckdb.connect(":memory:")
-        for stmt in filter(None, (s.strip() for s in schema_sql.split(";"))):
-            con.execute(stmt)
+        if schema_sql.strip():
+            # one execute() runs the whole multi-statement schema and does not
+            # choke on ';' inside string literals (unlike a naive split)
+            con.execute(schema_sql)
         rows = con.execute(query).fetchall()
-        # order-insensitive comparison unless the query itself ordered — we sort
-        # the gold and predicted identically, so ORDER BY correctness is folded in
-        # only when the gold relies on it. Good enough for exec-accuracy.
-        return True, sorted([tuple(str(c) for c in r) for r in rows])
+        return True, [tuple(_norm_cell(c) for c in r) for r in rows]
     except Exception as e:  # noqa: BLE001
         return False, str(e)
     finally:
@@ -113,7 +179,11 @@ def exec_match(schema_sql: str, gold_sql: str, pred_sql: str) -> bool:
     if not gold_ok:
         return False  # broken gold -> can't score; treat as miss
     pred_ok, pred = _run(schema_sql, pred_sql)
-    return pred_ok and pred == gold
+    if not pred_ok:
+        return False
+    if _has_top_level_order_by(gold_sql):
+        return pred == gold           # gold orders the result -> order matters
+    return sorted(gold) == sorted(pred)  # otherwise compare as a multiset
 
 
 _SQL_FENCE = re.compile(r"```(?:sql)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)

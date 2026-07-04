@@ -17,7 +17,7 @@ drq/                    Python package (the algorithm)
     base.py             Domain Protocol (7 methods + optional hooks)
     text2sql.py         Concrete domain: SQL prompts vs adversarial DuckDB challenges
 run.py                  CLI entry point (evolve | generality subcommands)
-tests/                  pytest suite — 51 tests, all fast
+tests/                  pytest suite — 110 tests, all fast
 ```
 
 ## Commands
@@ -61,6 +61,7 @@ evolve:
                           lower to ~5_000_000 for a paid API)
   --evolver-model MODEL   override model for mutation/generation LLM
   --worker-model MODEL    override model for eval/scoring LLM (deterministic temp=0)
+  --domain NAME           which domain to evolve: text2sql | code_improvement (default text2sql)
   --out DIR               output directory (run.jsonl, champions.json, opponents.json)
 
 generality:
@@ -112,11 +113,11 @@ generality:
 
 ## Adding a new domain
 
-1. Create `drq/domains/your_domain.py` implementing the `Domain` Protocol (7 methods in `base.py`).
-2. Implement `score_challenges(genome, challenges, worker_llm) -> dict` — this is used by generality evaluation.
-3. Implement `wrap_opponent(round_idx, challenges) -> Any` to create your opponent type.
-4. If your domain is coevolutionary, implement `new_challenge(llm, target_genome)` and `is_coevolutionary() -> True`.
-5. If not coevolutionary, leave `new_challenge` returning `None` and set `seed_challenges` to a fixed eval set.
+1. Create `drq/domains/your_domain.py` implementing the `Domain` Protocol (7 methods + 2 attributes always called by the engine).
+2. Implement `score_challenges(genome, challenges, worker_llm) -> dict` — the single evaluation kernel, used by both `fitness()` and generality.
+3. Optionally implement the hook `wrap_opponent(round_idx, challenges) -> Any` for a custom opponent type; engine provides a default if omitted.
+4. For coevolutionary domains, implement optional hooks `is_coevolutionary() -> True` and `new_challenge(llm, target_genome)`.
+5. For non-coevolutionary domains, omit the coevolution hooks and provide a fixed `seed_challenges` list.
 
 ## Known constraints
 

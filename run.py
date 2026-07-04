@@ -116,7 +116,11 @@ def cmd_generality(args):
     else:
         heldout = HELDOUT[args.domain]
     domain = DOMAINS[args.domain]()
-    worker = LLMClient(DRQConfig().llm)
+    # Score generality with the deterministic worker (temp 0.0), matching how
+    # training fitness is evaluated (engine uses .as_worker()); otherwise the
+    # headline curve is hotter and non-reproducible vs. the train_fitness beside it.
+    worker = LLMClient(DRQConfig().llm.as_worker(), role="worker",
+                       mock_reply=getattr(domain, "mock_reply", None))
     curve = evaluate_lineage(args.champions, heldout, worker, domain)
     out = os.path.join(args.out, "generality.json")
     with open(out, "w") as f:

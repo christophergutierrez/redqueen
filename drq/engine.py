@@ -20,6 +20,7 @@ import os
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import Any
 
 from .archive import Entity, MapElites
@@ -27,6 +28,20 @@ from .budget import TokenBudget
 from .config import DRQConfig
 from .domains.base import Domain
 from .llm import LLMClient
+
+
+@dataclass
+class _DefaultOpponent:
+    """Engine-owned Opponent used when a domain doesn't define `wrap_opponent`.
+    Satisfies the `Opponent` protocol (round, challenges, to_dict) so the engine's
+    reads never crash on a domain that relies on the default."""
+    round: int
+    challenges: list
+
+    def to_dict(self) -> dict:
+        return {"round": self.round,
+                "challenges": [c.to_dict() if hasattr(c, "to_dict") else c
+                               for c in self.challenges]}
 
 
 class DRQ:
@@ -37,13 +52,35 @@ class DRQ:
         # Shared token ceiling: both roles charge the same budget; the loop halts
         # cleanly when it is reached (see run()).
         self.budget = TokenBudget(cfg.token_budget)
-        self.evolver = LLMClient(cfg.evolver_llm or cfg.llm, budget=self.budget)
-        self.worker = LLMClient((cfg.worker_llm or cfg.llm).as_worker(), budget=self.budget)
+        # optional per-domain faithful mock (offline runs); llm.py stays domain-agnostic
+        mock_reply = getattr(self.domain, "mock_reply", None)
+        self.evolver = LLMClient(cfg.evolver_llm or cfg.llm, budget=self.budget,
+                                 role="evolver", mock_reply=mock_reply)
+        self.worker = LLMClient((cfg.worker_llm or cfg.llm).as_worker(), budget=self.budget,
+                                role="worker", mock_reply=mock_reply)
+        # Resolve OPTIONAL domain hooks once, here — the single place that supplies
+        # defaults for what a domain may omit (see domains/base.py). No inheritance.
+        self._coevolutionary = bool(getattr(self.domain, "is_coevolutionary", lambda: False)())
+        self._new_challenge = getattr(self.domain, "new_challenge", lambda llm, target: None)
+        self._wrap_opponent = getattr(self.domain, "wrap_opponent", self._default_wrap_opponent)
+        self._summarize = getattr(self.domain, "summarize_opponent", self._default_summarize)
+        self._genome_to_json = getattr(self.domain, "genome_to_json", lambda g: g)
+        self._pop_timing: Any = getattr(self.domain, "pop_timing", lambda: {})
         self.opponents: list[Any] = []   # growing history {C_0..C_{t-1}}
         self.champions: list[Entity] = []  # solver champion per round
         self._halted = False               # set True if a run stops on the token budget
         os.makedirs(cfg.out_dir, exist_ok=True)
         self._log_path = os.path.join(cfg.out_dir, "run.jsonl")
+
+    # --------------------------------------------------- optional-hook defaults
+    def _default_wrap_opponent(self, round_idx: int, challenges: list) -> _DefaultOpponent:
+        return _DefaultOpponent(round_idx, list(challenges))
+
+    @staticmethod
+    def _default_summarize(opponent: Any) -> list:
+        """Per-round opponent tag summary for the log (decouples the engine from
+        assuming challenges carry `.tags`)."""
+        return [getattr(c, "tags", []) for c in opponent.challenges]
 
     # ------------------------------------------------------------------ eval
     def _active_opponents(self) -> list[Any]:
@@ -52,10 +89,22 @@ class DRQ:
         return self.opponents  # full history = paper's "full DRQ"
 
     def _score(self, genome: Any, seed: int) -> Entity:
-        f, beh, meta = self.domain.fitness(
-            genome, self._active_opponents(), seed, worker_llm=self.worker)
-        return Entity(genome=genome, fitness=f, behavior=beh,
-                      cell=self.domain.cell(beh), meta=meta)
+        # One bad candidate must never abort the whole round/run: a scoring
+        # failure is treated as a miss (0.0), landed in its own cell, so the
+        # batch and all prior rounds' work survive.
+        try:
+            f, beh, meta = self.domain.fitness(
+                genome, self._active_opponents(), seed, worker_llm=self.worker)
+            return Entity(genome=genome, fitness=f, behavior=beh,
+                          cell=self.domain.cell(beh), meta=meta)
+        except Exception as e:  # noqa: BLE001
+            try:
+                beh = self.domain.behavior(genome, {})
+                cell = self.domain.cell(beh)
+            except Exception:  # noqa: BLE001
+                beh, cell = (), (0,)
+            return Entity(genome=genome, fitness=0.0, behavior=beh,
+                          cell=cell, meta={"error": str(e)})
 
     def _score_batch(self, genomes: list[Any]) -> list[Entity]:
         with ThreadPoolExecutor(max_workers=self.cfg.eval_workers) as ex:
@@ -69,14 +118,14 @@ class DRQ:
         challenges: list = []
         tries = 0
         while len(challenges) < n_want and tries < n_want * 4 and not self.budget.exceeded():
-            ch = self.domain.new_challenge(self.evolver, target)
+            ch = self._new_challenge(self.evolver, target)
             tries += 1
             if ch is not None:
                 challenges.append(ch)
         # round 0 falls back to seeds if the adversary produced nothing usable
         if not challenges:
             challenges = list(getattr(self.domain, "seed_challenges", []))
-        return self.domain.wrap_opponent(round_idx, challenges)
+        return self._wrap_opponent(round_idx, challenges)
 
     # ------------------------------------------------------------ solver step
     def _solver_step(self) -> MapElites:
@@ -116,15 +165,26 @@ class DRQ:
                       f"after {t} rounds — halting cleanly.")
                 break
             t0 = time.time()
-            # 1. adversary evolves a new opponent challenge-set vs current champion
-            cs = self._adversary_step(t, champion)
-            self.opponents.append(cs)
+            # 1. build this round's opponent. Coevolutionary domains evolve a fresh
+            #    challenge-set each round; non-coevolutionary domains install their
+            #    fixed seed set ONCE (round 0) instead of duplicating it every round.
+            if self._coevolutionary:
+                cs = self._adversary_step(t, champion)
+                self.opponents.append(cs)
+            elif t == 0:
+                cs = self._wrap_opponent(0, list(getattr(self.domain, "seed_challenges", [])))
+                self.opponents.append(cs)
+            else:
+                cs = None
             # 2. solver population evolves against the full opponent history
             me = self._solver_step()
             champion = me.best()
-            self.champions.append(champion)
+            # me.best() is None when the archive ended empty (e.g. --init-random 0
+            # with no prior champions); don't store/dereference a None champion.
+            if champion is not None:
+                self.champions.append(champion)
             # collect where this round's wall-clock went (LLM vs verify); optional hook
-            timing: dict = getattr(self.domain, "pop_timing", lambda: {})()
+            timing: dict = self._pop_timing()
             # 3. record
             rec = {
                 "round": t,
@@ -138,8 +198,8 @@ class DRQ:
                 "champion_fitness": round(champion.fitness, 3) if champion else None,
                 "champion_cell": list(champion.cell) if champion else None,
                 "champion_meta": champion.meta if champion else None,
-                "champion_genome": champion.genome if champion else None,
-                "new_challenge_tags": [c.tags for c in cs.challenges],
+                "champion_genome": self._genome_to_json(champion.genome) if champion else None,
+                "new_challenge_tags": self._summarize(cs) if cs is not None else None,
             }
             self._append_log(rec)
             tinfo = (f" llm={timing['llm_s']}s vrf={timing['verify_s']}s"
@@ -157,7 +217,8 @@ class DRQ:
 
     def _dump_final(self) -> None:
         with open(os.path.join(self.cfg.out_dir, "champions.json"), "w") as f:
-            json.dump([{"round": i, "fitness": c.fitness, "genome": c.genome,
+            json.dump([{"round": i, "fitness": c.fitness,
+                        "genome": self._genome_to_json(c.genome),
                         "cell": list(c.cell)} for i, c in enumerate(self.champions)],
                       f, indent=2)
         with open(os.path.join(self.cfg.out_dir, "opponents.json"), "w") as f:

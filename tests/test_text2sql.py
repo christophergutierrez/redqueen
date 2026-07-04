@@ -36,11 +36,39 @@ def test_exec_match_broken_gold():
     assert exec_match(SCHEMA, gold, pred) is False
 
 
-def test_exec_match_order_insensitive():
+def test_exec_match_order_sensitive_when_gold_orders():
+    """When gold has a top-level ORDER BY, a reversed prediction is WRONG.
+    (Previously this passed because both sides were sorted — that hid the bug.)"""
     gold = "SELECT val FROM t ORDER BY val ASC;"
     pred = "SELECT val FROM t ORDER BY val DESC;"
-    # Both return same rows; sorted comparison should still match
+    assert exec_match(SCHEMA, gold, pred) is False
+
+
+def test_exec_match_multiset_when_gold_unordered():
+    """No ORDER BY in gold -> compare as a multiset; row order must not matter."""
+    gold = "SELECT val FROM t WHERE val > 5;"
+    pred = "SELECT val FROM t WHERE val > 5 ORDER BY val DESC;"
     assert exec_match(SCHEMA, gold, pred) is True
+
+
+def test_exec_match_numeric_type_equivalence():
+    """Decimal SUM vs the same value as DOUBLE must compare equal (the core M1 bug)."""
+    schema = "CREATE TABLE o(a DECIMAL(10,2)); INSERT INTO o VALUES (100.0),(50.0);"
+    gold = "SELECT SUM(a) FROM o;"           # -> Decimal('150.00')
+    pred = "SELECT SUM(a::DOUBLE) FROM o;"   # -> 150.0
+    assert exec_match(schema, gold, pred) is True
+
+
+def test_exec_match_int_float_equivalence():
+    schema = "CREATE TABLE o(a INTEGER); INSERT INTO o VALUES (2),(2);"
+    assert exec_match(schema, "SELECT COUNT(*) FROM o;", "SELECT 2.0;") is True
+
+
+def test_exec_match_semicolon_in_string_literal():
+    """A ';' inside an inserted string must not break schema execution."""
+    schema = "CREATE TABLE t(x TEXT); INSERT INTO t VALUES ('a;b'),('c');"
+    gold = "SELECT x FROM t WHERE x = 'a;b';"
+    assert exec_match(schema, gold, gold) is True
 
 
 def test_exec_match_empty_result_sets():
@@ -80,6 +108,54 @@ def test_exec_match_pred_without_order_matches_ordered_gold():
     gold = "SELECT val FROM t ORDER BY val ASC;"
     pred = "SELECT val FROM t;"
     assert exec_match(SCHEMA, gold, pred) is True
+
+
+# --------------------------------------------------------------------------- #
+# Tribunal fixes — ORDER BY noise, non-finite reals, bool/text collision       #
+# --------------------------------------------------------------------------- #
+
+
+def test_exec_match_order_by_in_string_literal_is_not_ordering():
+    """A literal 'order by ...' in a WHERE clause must NOT make gold count as
+    top-level-ordered; the compare stays a multiset so a reordered pred matches."""
+    schema = ("CREATE TABLE t(x TEXT); "
+              "INSERT INTO t VALUES ('order by z'),('a'),('b');")
+    gold = "SELECT x FROM t WHERE x <> 'zzz';"           # no real ORDER BY
+    pred = "SELECT x FROM t WHERE x <> 'zzz' ORDER BY x DESC;"
+    assert exec_match(schema, gold, pred) is True
+
+
+def test_exec_match_order_by_in_comment_is_not_ordering():
+    """An `-- order by` comment must not force an ordered comparison."""
+    gold = "SELECT val FROM t;  -- order by val\n"
+    pred = "SELECT val FROM t ORDER BY val DESC;"
+    assert exec_match(SCHEMA, gold, pred) is True
+
+
+def test_exec_match_real_order_by_still_ordered_with_string_noise():
+    """The noise-stripping must not hide a REAL top-level ORDER BY that sits
+    alongside a string literal containing the words."""
+    schema = ("CREATE TABLE t(x TEXT); "
+              "INSERT INTO t VALUES ('order by'),('a'),('b');")
+    gold = "SELECT x FROM t ORDER BY x ASC;"
+    pred = "SELECT x FROM t ORDER BY x DESC;"
+    assert exec_match(schema, gold, pred) is False
+
+
+def test_exec_match_nan_matches_itself():
+    """A gold whose result contains NaN must not crash _norm_cell (int(nan)
+    raises) and must match an identical prediction."""
+    schema = "CREATE TABLE t(a DOUBLE); INSERT INTO t VALUES (0.0);"
+    q = "SELECT a / a FROM t;"        # 0.0/0.0 -> NaN
+    assert exec_match(schema, q, q) is True
+
+
+def test_exec_match_bool_not_confused_with_text():
+    """A BOOLEAN true must not compare equal to the TEXT string 'true'."""
+    schema = "CREATE TABLE t(b BOOLEAN, s TEXT); INSERT INTO t VALUES (true, 'true');"
+    gold = "SELECT b FROM t;"         # BOOLEAN true
+    pred = "SELECT s FROM t;"         # TEXT 'true'
+    assert exec_match(schema, gold, pred) is False
 
 
 def test_extract_sql_fenced():

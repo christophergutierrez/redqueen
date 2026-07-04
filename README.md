@@ -15,11 +15,14 @@ drq/
   config.py            # all knobs (rounds, MAP-Elites, LLM endpoint)
   llm.py               # OpenAI-compatible client (vLLM/Ollama/llama.cpp) + mock mode
   archive.py           # MAP-Elites quality-diversity archive
+  budget.py            # cumulative token-budget ceiling (clean halt)
+  timing.py            # thread-safe LLM-vs-verify timing split
+  engine.py            # outer Red Queen loop + inner MAP-Elites, threaded eval
+  generality.py        # held-out generality curve (the real progress metric)
   domains/
     base.py            # Domain Protocol (swap in your own domain here)
     text2sql.py        # concrete domain: solver-prompts vs adversarial challenges
-  drq.py               # outer Red Queen loop + inner MAP-Elites, threaded eval
-  generality.py        # held-out generality curve (the real progress metric)
+    code_improvement.py # concrete domain: coding-agent prompts vs bug-fix challenges
 run.py                 # CLI: evolve | generality
 ```
 
@@ -32,6 +35,9 @@ DRQ_LLM_MOCK=1 python run.py evolve --rounds 4 --iterations 6 --init-random 4 --
 # real run against a local model (Ollama)
 OPENAI_BASE_URL=http://localhost:11434/v1 DRQ_MODEL=qwen2.5-coder:32b \
   python run.py evolve --rounds 12 --out runs/sql1
+
+# with token budget for paid APIs (e.g. 5M tokens)
+OPENAI_BASE_URL=... DRQ_MODEL=... python run.py evolve --rounds 12 --token-budget 5000000 --out runs/sql1
 
 # measure generality of the champion lineage against a held-out challenge set
 python run.py generality --champions runs/sql1/champions.json --out runs/sql1

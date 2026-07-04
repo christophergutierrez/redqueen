@@ -6,10 +6,13 @@ fitness signal is real (gold -> 1.0, wrong -> 0.0) rather than a constant.
 """
 import json
 
+import pytest
+
+import drq.domains.code_improvement as ci
 from drq.domains.base import Domain
 from drq.domains.code_improvement import (
     CodeChallenge, CodeChallengeSet, CodeImprovementDomain, SEED_CHALLENGES,
-    extract_patch, run_verify,
+    _isolation_prefix, extract_patch, run_verify,
 )
 from drq.llm import ChatResult
 
@@ -105,6 +108,138 @@ def test_sandbox_timeout():
         "test_target.py": "import loop\ndef test_x():\n    assert True\n",
     }
     assert run_verify(files, "loop.py", "while True:\n    pass\n", timeout=3.0) is False
+
+
+def test_sandbox_scrubs_secrets(monkeypatch):
+    """The sandbox child's OWN environment block must carry no parent secrets
+    (defense-in-depth against naive os.environ reads). Before M4 the key was in
+    the child env; now it is absent. NOTE: this does NOT prove full protection —
+    /proc/<ancestor>/environ can still recover secrets until PID-namespace
+    isolation is added (documented residual, deferred follow-up)."""
+    # run regardless of host isolation: without namespaces run_verify would
+    # refuse by default, but the env scrub is what's under test here.
+    monkeypatch.setattr(ci, "_ALLOW_UNSANDBOXED", True)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-should-not-leak")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws-should-not-leak")
+    test = (
+        "import os\n"
+        "def test_no_secrets():\n"
+        "    assert os.environ.get('OPENAI_API_KEY', 'ABSENT') == 'ABSENT'\n"
+        "    assert os.environ.get('AWS_SECRET_ACCESS_KEY', 'ABSENT') == 'ABSENT'\n"
+    )
+    files = {"test_target.py": test}
+    assert run_verify(files, "test_target.py", test) is True
+
+
+def test_sandbox_timeout_reaps_workload():
+    """A timed-out infinite loop must leave no orphaned CPU-spinning process.
+    Regression: `unshare --fork` orphaned pytest as PID 1 of the namespace until
+    `--kill-child` was added. Orphans are attributed via their `drq_ci_` cwd."""
+    if not _isolation_prefix():
+        pytest.skip("namespaces unavailable; timeout kills pytest directly")
+    import glob
+    import os
+    import time
+
+    files = {"m.py": "x=1\n",
+             "test_target.py": "def test():\n    while True:\n        pass\n"}
+    assert run_verify(files, "m.py", "x=1\n", timeout=3.0) is False
+    time.sleep(1.0)
+    survivors = []
+    for cwd_link in glob.glob("/proc/[0-9]*/cwd"):
+        try:
+            if "drq_ci_" in os.readlink(cwd_link):
+                survivors.append(os.readlink(cwd_link))
+        except OSError:
+            pass
+    assert not survivors, f"orphaned sandbox processes survived timeout: {survivors}"
+
+
+def test_sandbox_isolates_proc_ancestors(monkeypatch):
+    """The real fix: with namespace isolation, generated code cannot recover a
+    parent secret via /proc/<ancestor>/environ. Skips where unprivileged
+    namespaces are unavailable (isolation degrades to scrubbed-env only)."""
+    if not _isolation_prefix():
+        pytest.skip("unprivileged namespaces unavailable on this host")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-proc-canary")
+    test = (
+        "import os\n"
+        "def test_no_proc_leak():\n"
+        "    hits = []\n"
+        "    for pid in os.listdir('/proc'):\n"
+        "        if not pid.isdigit():\n"
+        "            continue\n"
+        "        try:\n"
+        "            with open(f'/proc/{pid}/environ', 'rb') as f:\n"
+        "                if b'sk-proc-canary' in f.read():\n"
+        "                    hits.append(pid)\n"
+        "        except OSError:\n"
+        "            pass\n"
+        "    assert not hits, f'secret recovered via /proc pids {hits}'\n"
+    )
+    files = {"test_target.py": test}
+    assert run_verify(files, "test_target.py", test) is True
+
+
+# --------------------------------------------------------------------------- #
+# Tribunal fixes — fitness-signal forgery, HOME scrub, unsandboxed refusal     #
+# --------------------------------------------------------------------------- #
+
+
+def test_exit_zero_cannot_forge_pass():
+    """CRITICAL: the pass signal is pytest's JUnit report, not the exit code. A
+    patch that `os._exit(0)`s during collection (never fixing the bug) must NOT
+    score as a pass, while the genuine fix still does."""
+    if not _isolation_prefix():
+        pytest.skip("namespaces unavailable; run_verify refuses by default")
+    files = {
+        "target.py": "def f():\n    return 1\n",              # bug: should return 2
+        "test_target.py": "import target\ndef test_f():\n    assert target.f() == 2\n",
+    }
+    # forge: exit 0 before pytest can write a report -> no report -> miss
+    assert run_verify(files, "target.py", "import os\nos._exit(0)\n") is False
+    # sys.exit at import is likewise not a pass
+    assert run_verify(files, "target.py", "import sys\nsys.exit(0)\n") is False
+    # the real fix genuinely passes
+    assert run_verify(files, "target.py", "def f():\n    return 2\n") is True
+
+
+def test_home_is_scrubbed_to_sandbox():
+    """HOME must point at the throwaway sandbox, not the real home dir, so
+    `~/.ssh`/`~/.aws`-relative reads land in an empty tmpdir."""
+    if not _isolation_prefix():
+        pytest.skip("namespaces unavailable; run_verify refuses by default")
+    test = (
+        "import os\n"
+        "def test_home_sandboxed():\n"
+        "    h = os.environ.get('HOME', '')\n"
+        "    assert 'drq_ci_' in h\n"                       # the sandbox, not real home
+        "    assert os.path.realpath(h) == os.path.realpath(os.getcwd())\n"
+    )
+    files = {"test_target.py": test}
+    assert run_verify(files, "test_target.py", test) is True
+
+
+def test_home_not_in_env_allowlist():
+    """HOME must never be inherited from the parent (it would leak the real home
+    path and point generated code at ~/.ssh, ~/.aws)."""
+    assert "HOME" not in ci._ENV_ALLOWLIST
+
+
+def test_unsandboxed_refused_without_optin(monkeypatch):
+    """When namespaces are unavailable, run_verify must refuse (warn once, return
+    False) rather than execute untrusted code bare — unless explicitly opted in."""
+    monkeypatch.setattr(ci, "_isolation_prefix", lambda: ())   # force no isolation
+    monkeypatch.setattr(ci, "_ALLOW_UNSANDBOXED", False)
+    monkeypatch.setattr(ci, "_UNSANDBOXED_WARNED", False)
+    files = {"test_target.py": "def test_ok():\n    assert True\n"}
+    with pytest.warns(RuntimeWarning, match="unsandboxed"):
+        assert run_verify(files, "test_target.py",
+                          "def test_ok():\n    assert True\n") is False
+    # with the explicit opt-in it runs (bare) and can pass
+    monkeypatch.setattr(ci, "_ALLOW_UNSANDBOXED", True)
+    assert run_verify(files, "test_target.py",
+                      "def test_ok():\n    assert True\n") is True
 
 
 # --------------------------------------------------------------------------- #
@@ -260,6 +395,45 @@ def test_challenge_roundtrips_through_dict():
     rebuilt = CodeChallenge(**d)
     assert rebuilt.target_file == ch.target_file
     assert rebuilt.gold_content == ch.gold_content
+
+
+# --------------------------------------------------------------------------- #
+# Mock fidelity (M5)                                                           #
+# --------------------------------------------------------------------------- #
+
+
+def test_mock_reply_worker_is_valid_python_but_wrong():
+    d = CodeImprovementDomain()
+    patch = extract_patch(d.mock_reply("genome-as-system", "fix this", "worker"))
+    compile(patch, "<mock>", "exec")                       # syntactically valid
+    ch = SEED_CHALLENGES[0]
+    assert run_verify(ch.files, ch.target_file, patch) is False  # but does not solve -> 0.0
+
+
+def test_mock_reply_evolver_is_coding_prompt_not_sql():
+    d = CodeImprovementDomain()
+    prompt = d.mock_reply("sys", "user", "evolver")
+    assert "SQL" not in prompt and "SQL analyst" not in prompt
+    assert "python" in prompt.lower()
+
+
+def test_mock_evolve_code_improvement_champion_is_coding_prompt(tmp_path):
+    """End-to-end offline: champion genomes must be coding prompts (not the
+    SQL-analyst stand-in), and mock fitness stays 0.0."""
+    from drq.config import DRQConfig, LLMConfig, MapElitesConfig
+    from drq.engine import DRQ
+
+    cfg = DRQConfig(
+        rounds=1, out_dir=str(tmp_path), token_budget=0,
+        llm=LLMConfig(mock=True),
+        me=MapElitesConfig(iterations=1, init_random=1, batch_size=1,
+                           seed_with_champions=False),
+    )
+    champs = DRQ(CodeImprovementDomain(seed_challenges=[SEED_CHALLENGES[0]]), cfg).run()
+    assert champs, "expected at least one champion"
+    assert "SQL analyst" not in champs[0].genome
+    assert "```python" in champs[0].genome or "Python engineer" in champs[0].genome
+    assert champs[0].fitness == 0.0                        # mock-fitness contract held
 
 
 # --------------------------------------------------------------------------- #

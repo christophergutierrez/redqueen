@@ -26,10 +26,13 @@ class ChatResult:
 
 
 class LLMClient:
-    def __init__(self, cfg: LLMConfig, budget: "TokenBudget | None" = None):
+    def __init__(self, cfg: LLMConfig, budget: "TokenBudget | None" = None,
+                 role: str = "worker", mock_reply=None):
         self.cfg = cfg
         self._rng = random.Random(0)
         self.budget = budget
+        self.role = role            # "evolver" | "worker" — passed to a domain mock hook
+        self.mock_reply = mock_reply  # optional Callable(system, user, role) -> str | None
 
     def chat(self, system: str, user: str,
              max_tokens: int | None = None) -> ChatResult:
@@ -57,7 +60,10 @@ class LLMClient:
         try:
             with urllib.request.urlopen(req, timeout=self.cfg.timeout_s) as resp:
                 data = json.loads(resp.read())
-            res = ChatResult(text=data["choices"][0]["message"]["content"])
+            # content is null on finish_reason=length / tool-calls / filtered
+            # completions; coerce to "" so downstream .strip()/regex never see None
+            content = data["choices"][0]["message"].get("content") or ""
+            res = ChatResult(text=content)
             self._account(system, user, res, data.get("usage"))
             return res
         except Exception as e:  # noqa: BLE001 - surface everything as a soft failure
@@ -80,7 +86,15 @@ class LLMClient:
 
     # ------------------------------------------------------------------ mock
     def _mock(self, system: str, user: str) -> ChatResult:
-        """Cheap deterministic-ish stand-in so the loop is testable offline."""
+        """Cheap deterministic-ish stand-in so the loop is testable offline.
+
+        A domain may supply a faithful reply via `mock_reply` (kept domain-agnostic
+        here — we just call the callable); otherwise fall back to the generic
+        SQL-flavored stand-in below."""
+        if self.mock_reply is not None:
+            reply = self.mock_reply(system, user, self.role)
+            if reply is not None:
+                return ChatResult(text=reply)
         if "Return ONLY a SQL query" in system or "SQL" in system[:200]:
             # worker mock: emit a plausible query
             return ChatResult(text="SELECT COUNT(*) FROM orders;")

@@ -8,6 +8,30 @@ A DRQ domain must know how to:
 
 The outer DRQ loop and the MAP-Elites inner loop are entirely domain-agnostic;
 everything domain-specific lives behind this Protocol.
+
+Contract shape (see also the engine, which is the single place that resolves
+optional hooks):
+
+  * `Domain` below is the REQUIRED core — `isinstance(x, Domain)` means "x has
+    the methods the engine always calls". These are structural (`...`) stubs; a
+    Protocol cannot supply inherited default bodies, so we do not pretend to.
+  * `Opponent` is the structural contract for the object `wrap_opponent` returns
+    and the engine appends to the Red Queen history each round.
+  * OPTIONAL HOOKS are NOT part of the checked core. The engine resolves each via
+    `getattr(domain, name, <default>)`, so a domain simply omits what it doesn't
+    need — there is no inheritance to rely on. Recognized hooks + engine defaults:
+
+        is_coevolutionary()            -> False
+        new_challenge(llm, target)     -> None
+        wrap_opponent(round, chs)      -> engine._DefaultOpponent(round, chs)
+        summarize_opponent(opponent)   -> [getattr(c, "tags", []) for c in opp.challenges]
+        genome_to_json(genome)         -> genome   (identity; for champions.json / run.jsonl)
+        genome_from_json(raw)          -> raw       (identity; inverse, for generality)
+            ^ define these two together or neither: if a domain serializes a
+              structured genome via genome_to_json it MUST provide the inverse,
+              else generality feeds the raw JSON straight to score_challenges.
+        pop_timing()                   -> {}
+        mock_reply(system, user, role) -> None
 """
 from __future__ import annotations
 
@@ -17,9 +41,21 @@ from ..llm import LLMClient
 
 
 @runtime_checkable
+class Opponent(Protocol):
+    """The opponent type a domain's `wrap_opponent` produces and the engine
+    appends to the history. The engine reads `.challenges` and `.to_dict()`
+    (and `.round` for serialization)."""
+    round: int
+    challenges: Sequence[Any]
+
+    def to_dict(self) -> dict: ...
+
+
+@runtime_checkable
 class Domain(Protocol):
+    """Required core. `isinstance(x, Domain)` == 'x is a usable domain core'."""
     name: str
-    seed_challenges: Sequence  # fallback challenge list used when adversary produces nothing
+    seed_challenges: Sequence  # fallback / fixed challenge list
 
     def system_prompt(self) -> str: ...
 
@@ -32,7 +68,7 @@ class Domain(Protocol):
         ...
 
     def behavior(self, genome: Any, eval_ctx: dict) -> tuple[float, ...]:
-        """Raw behavioral descriptor, filled during evaluation."""
+        """Raw behavioral descriptor for the genome."""
         ...
 
     def cell(self, behavior: tuple[float, ...]) -> tuple[int, ...]:
@@ -40,40 +76,29 @@ class Domain(Protocol):
         ...
 
     def fitness(self, genome: Any, opponents: Sequence[Any], seed: int,
-               worker_llm: "LLMClient | None" = None) -> tuple[float, tuple[float, ...], dict]:
+                worker_llm: "LLMClient | None" = None) -> tuple[float, tuple[float, ...], dict]:
         """Score `genome` in the environment defined by `opponents`.
 
-        Returns (fitness, raw_behavior, meta). This is where the simulation /
-        LLM-judge / metric lives. Higher fitness is better.
+        Returns (fitness, raw_behavior, meta). Higher fitness is better.
         """
         ...
 
-    # --- adversarial / co-evolution hooks (optional; default no-op) -----------
-    def new_challenge(self, llm: LLMClient, target_genome: Any) -> Any:
-        """Adversary population: propose a challenge that breaks `target_genome`."""
-        return None
-
-    def wrap_opponent(self, round_idx: int, challenges: list) -> Any:
-        """Package a list of challenges into the domain's opponent type."""
-        return challenges
-
     def score_challenges(self, genome: Any, challenges: list,
                          worker_llm: "LLMClient | None" = None) -> dict:
-        """Evaluate genome against a specific challenge list.
-
+        """Evaluate genome against a specific challenge list. The single
+        evaluation kernel — both `fitness()` and generality delegate here.
         Returns at minimum {"accuracy": float, "n_challenges": int, "per_tag": dict}.
-        Used by generality evaluation so it stays domain-agnostic.
         """
-        return {}
+        ...
 
-    def is_coevolutionary(self) -> bool:
-        return False
 
-    def pop_timing(self) -> dict:
-        """Return and reset accumulated evaluation timing (seconds). Optional.
+@runtime_checkable
+class CoevolutionaryDomain(Domain, Protocol):
+    """Informational typed target for co-evolutionary domains (the adversary
+    hooks). Not required at runtime — the engine resolves these via getattr."""
 
-        When implemented, keys are: llm_s, verify_s, llm_calls, verify_calls.
-        The engine records this per round so run.jsonl shows where the wall-clock
-        went (model generation vs. verification). Default: no timing.
-        """
-        return {}
+    def is_coevolutionary(self) -> bool: ...
+
+    def new_challenge(self, llm: LLMClient, target_genome: Any) -> Any: ...
+
+    def wrap_opponent(self, round_idx: int, challenges: list) -> Opponent: ...

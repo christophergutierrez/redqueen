@@ -33,9 +33,12 @@ def evaluate_lineage(champions_json: str, heldout: Sequence, worker: LLMClient,
     """Score every round's champion against the same held-out set -> generality curve."""
     with open(champions_json) as f:
         champs = json.load(f)
+    # champions.json stores genomes via domain.genome_to_json; invert here so a
+    # structured-genome domain round-trips. Identity for plain-string genomes.
+    to_genome = getattr(domain, "genome_from_json", lambda raw: raw)
     curve = []
     for c in champs:
-        g = generality(c["genome"], heldout, worker, domain)
+        g = generality(to_genome(c["genome"]), heldout, worker, domain)
         curve.append({"round": c["round"], "train_fitness": c["fitness"], **g})
         print(f"[gen] round {c['round']:>2} "
               f"train={c['fitness']:.3f} heldout_generality={g['generality']:.3f}")

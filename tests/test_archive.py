@@ -73,6 +73,18 @@ def test_coverage_and_qd_score():
     assert me.qd_score() == pytest.approx(1.0)
 
 
+def test_empty_archive_metrics():
+    """An archive that never accepted an entity (e.g. --init-random 0, every
+    scoring failed) must report zeroed metrics and None selectors, not crash."""
+    me = MapElites(random.Random(0))
+    assert len(me) == 0
+    assert me.coverage() == 0
+    assert me.qd_score() == 0.0        # sum over empty grid
+    assert me.best() is None           # no champion to dereference
+    assert me.sample() is None         # nothing to mutate
+    assert me.elites() == []
+
+
 def test_lin_bin_clamp_below():
     assert lin_bin(-5.0, 0.0, 10.0, 5) == 0
 
