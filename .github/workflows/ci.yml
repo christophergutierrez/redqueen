@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: ["master", "main"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Run tests
+        run: python -m pytest tests/ -q
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Type check
+        run: mypy drq/ run.py --ignore-missing-imports --no-strict-optional
+
+      - name: Smoke test — text2sql (mock)
+        run: DRQ_LLM_MOCK=1 python run.py evolve --rounds 2 --iterations 3 --init-random 2 --batch 2 --out runs/smoke_sql
+
+      - name: Smoke test — code_improvement (mock, unsandboxed)
+        run: DRQ_LLM_MOCK=1 DRQ_ALLOW_UNSANDBOXED=1 python run.py evolve --domain code_improvement --rounds 2 --iterations 3 --init-random 2 --batch 2 --out runs/smoke_ci

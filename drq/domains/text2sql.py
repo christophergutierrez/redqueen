@@ -92,6 +92,12 @@ SEED_CHALLENGES: list[Challenge] = [
 
 _NULL = "\x00NULL"  # sentinel so a SQL NULL never collides with the string 'None'
 
+# DuckDB connection config used for ALL evaluations. external_access=False disables
+# file/network I/O (read_csv, read_text, COPY TO file, extension autoloading) while
+# leaving in-memory query execution intact — which is all the evaluator needs.
+# Without this, adversary-authored SQL can read host files and write via COPY TO.
+_DUCKDB_EVAL_CONFIG = {"enable_external_access": False}
+
 
 def _norm_cell(c: Any) -> str:
     """Canonicalize a result cell so numerically-equal answers compare equal.
@@ -160,7 +166,7 @@ def _run(schema_sql: str, query: str) -> tuple[bool, Any]:
     Rows are NOT sorted here — ordering is decided by exec_match."""
     con = None
     try:
-        con = duckdb.connect(":memory:")
+        con = duckdb.connect(":memory:", config=_DUCKDB_EVAL_CONFIG)
         if schema_sql.strip():
             # one execute() runs the whole multi-statement schema and does not
             # choke on ';' inside string literals (unlike a naive split)

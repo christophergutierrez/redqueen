@@ -16,8 +16,9 @@ drq/                    Python package (the algorithm)
   domains/
     base.py             Domain Protocol (7 methods + optional hooks)
     text2sql.py         Concrete domain: SQL prompts vs adversarial DuckDB challenges
+    code_improvement.py Concrete domain: coding-agent prompts vs bug-fix challenges
 run.py                  CLI entry point (evolve | generality subcommands)
-tests/                  pytest suite — 110 tests, all fast
+tests/                  pytest suite — 119 tests, all fast
 ```
 
 ## Commands
@@ -123,6 +124,11 @@ generality:
 
 ## Known constraints
 
-- **Mock mode fitness is always 0.0**: The mock worker always returns `SELECT COUNT(*) FROM orders;` which doesn't match any gold SQL. The loop still runs and produces valid structure — just don't interpret mock fitness values.
+- **Mock mode fitness is always 0.0**:
+  - `text2sql`: the mock worker returns `SELECT COUNT(*) FROM orders;` which doesn't match any gold SQL.
+  - `code_improvement`: the mock worker returns a syntactically valid but non-solving patch, so no test passes.
+  - Both domains: the loop runs and produces valid output structure — just don't interpret mock fitness values.
+- **`code_improvement` sandbox refusal**: when unprivileged namespaces (`unshare`) are unavailable (macOS, some CI), `run_verify` refuses to execute model-generated code and scores every challenge as a miss. Set `DRQ_ALLOW_UNSANDBOXED=1` to override with a trusted model only. This also means 6 `test_code_improvement` tests that require sandbox execution are expected to fail on macOS.
+- **text2sql evaluation safety**: `_run()` connects with `enable_external_access=False` to block file/network I/O from adversary SQL. All evaluation connections use `_DUCKDB_EVAL_CONFIG`.
 - **Gold SQL correctness**: The adversary admission check verifies gold SQL *executes* but not that it's *correct*. For production use, curate a trusted held-out set (Spider/BIRD) rather than relying on LLM-generated gold.
 - **`domain.seed_challenges` is accessed via `getattr` with `[]` fallback**: If your domain has no seed challenges, return an empty list (or a non-empty default set) from `__init__`.

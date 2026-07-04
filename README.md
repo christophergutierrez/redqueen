@@ -214,6 +214,12 @@ not full DRQ.
 - Paper-faithful, but their result is a **statistical trend over ~96 runs**, weak
   per-run. Expect the generality curve to be noisy; run multiple seeds and
   aggregate before concluding anything.
+- **text2sql evaluation safety.** `_run()` executes adversary-authored SQL in an
+  in-memory DuckDB with `enable_external_access=False`, which blocks file/network
+  I/O (read_csv, COPY TO file, extension autoloading). Without this flag, a
+  crafted `gold_sql` can read host files (`/etc/passwd`, `~/.aws/credentials`)
+  or write via `COPY TO`. The flag is set at the module level in `_DUCKDB_EVAL_CONFIG`
+  and applied to every evaluation connection.
 - LLM-authored gold SQL can be subtly wrong even when it executes. The admission
   check catches *broken* gold, not *incorrect* gold. For production use, curate a
   trusted held-out set (Spider/BIRD schemas are a good source) rather than
