@@ -1,6 +1,6 @@
 import pytest
 from drq.domains.text2sql import (
-    Challenge, ChallengeSet, exec_match, extract_sql, Text2SQLDomain,
+    Challenge, ChallengeSet, exec_match, extract_sql, Text2SQLDomain, _run,
 )
 from drq.llm import ChatResult
 from drq.config import LLMConfig
@@ -290,3 +290,26 @@ def test_score_challenges_mixed():
     result = domain.score_challenges("genome", [correct_ch, wrong_ch], worker)
     assert result["accuracy"] == pytest.approx(0.5)
     assert result["n_challenges"] == 2
+
+
+# --------------------------------------------------------------------------- #
+# Security regression: DuckDB external access must be disabled                #
+# --------------------------------------------------------------------------- #
+
+def test_run_blocks_filesystem_read():
+    """_run must refuse DuckDB filesystem access (read_csv_auto, read_text, etc).
+    A future refactor that drops _DUCKDB_EVAL_CONFIG would silently reopen
+    host-filesystem access for adversary SQL; this test makes that regression
+    immediately visible."""
+    ok, result = _run("", "SELECT * FROM read_csv_auto('/etc/passwd')")
+    assert ok is False, "DuckDB filesystem read should be blocked"
+    assert isinstance(result, str)
+    assert "Permission" in result or "access" in result.lower()
+
+
+def test_run_normal_query_still_works():
+    """Sanity-check that enable_external_access=False doesn't break in-memory eval."""
+    schema = "CREATE TABLE t(v INTEGER); INSERT INTO t VALUES (1),(2),(3);"
+    ok, rows = _run(schema, "SELECT SUM(v) FROM t;")
+    assert ok is True
+    assert rows == [("6",)]

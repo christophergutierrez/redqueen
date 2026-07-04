@@ -38,10 +38,6 @@ from ..archive import lin_bin
 from ..llm import LLMClient
 from ..timing import EvalTimer
 
-# --------------------------------------------------------------------------- #
-# Challenge representation                                                     #
-# --------------------------------------------------------------------------- #
-
 
 @dataclass
 class Challenge:
@@ -96,7 +92,11 @@ _NULL = "\x00NULL"  # sentinel so a SQL NULL never collides with the string 'Non
 # file/network I/O (read_csv, read_text, COPY TO file, extension autoloading) while
 # leaving in-memory query execution intact — which is all the evaluator needs.
 # Without this, adversary-authored SQL can read host files and write via COPY TO.
-_DUCKDB_EVAL_CONFIG = {"enable_external_access": False}
+_DUCKDB_EVAL_CONFIG: dict[str, Any] = {"enable_external_access": False}
+
+# --------------------------------------------------------------------------- #
+# Challenge representation                                                     #
+# --------------------------------------------------------------------------- #
 
 
 def _norm_cell(c: Any) -> str:
