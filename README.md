@@ -10,6 +10,8 @@ a fixed benchmark is the paper's single-round baseline — it produces brittle
 specialists (each beats ~28% of held-out cases). So this port co-evolves two
 populations instead of hill-climbing one.
 
+For a short conceptual walkthrough, see [The Red Queen](https://youtu.be/DzBmsXAnRWY).
+
 ```
 drq/
   config.py            # all knobs (rounds, MAP-Elites, LLM endpoint)
